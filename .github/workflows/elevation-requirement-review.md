@@ -14,6 +14,7 @@ on:
         description: Pull request number for a targeted pilot
         required: false
         type: string
+  roles: all
 if: >-
   github.event_name == 'workflow_dispatch' ||
   (
@@ -46,6 +47,8 @@ safe-outputs:
     footer: "###### Template: msftbot/authorAssist/elevationRequirement by [{workflow_name}]({run_url})"
   threat-detection: true
   report-failure-as-issue: false
+  missing-tool: false
+  missing-data: false
   noop:
     report-as-issue: false
   add-comment:
