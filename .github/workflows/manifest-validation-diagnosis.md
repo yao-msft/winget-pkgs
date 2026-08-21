@@ -9,16 +9,26 @@ description: >-
 on:
   pull_request_target:
     types: [labeled]
+  workflow_dispatch:
+    inputs:
+      pull_request_number:
+        description: Pull request number for a targeted Unexpected-File pilot
+        required: false
+        type: string
   roles: [admin, maintainer, write]
 if: >-
-  github.event_name == 'pull_request_target' &&
-  github.event.action == 'labeled' &&
-  github.event.pull_request.user.login != 'wingetbot' &&
+  github.event_name == 'workflow_dispatch' ||
   (
-    github.event.label.name == 'Manifest-Validation-Error' ||
-    github.event.label.name == 'Manifest-Installer-Validation-Error' ||
-    github.event.label.name == 'Manifest-AppsAndFeaturesVersion-Error' ||
-    github.event.label.name == 'Manifest-Singleton-Deprecated'
+    github.event_name == 'pull_request_target' &&
+    github.event.action == 'labeled' &&
+    github.event.pull_request.user.login != 'wingetbot' &&
+    (
+      github.event.label.name == 'Manifest-Validation-Error' ||
+      github.event.label.name == 'Manifest-Installer-Validation-Error' ||
+      github.event.label.name == 'Manifest-AppsAndFeaturesVersion-Error' ||
+      github.event.label.name == 'Manifest-Singleton-Deprecated' ||
+      github.event.label.name == 'Unexpected-File'
+    )
   )
 checkout: false
 pre-agent-steps:
@@ -26,7 +36,9 @@ pre-agent-steps:
     uses: actions/github-script@v9
     env:
       TARGET_PR: >-
-        ${{ github.event.pull_request.number || '' }}
+        ${{ github.event.pull_request.number ||
+        github.event.inputs.pull_request_number ||
+        fromJSON(github.event.inputs.aw_context || '{}').item_number || '' }}
       TRIGGER_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
     with:
       github-token: "${{ github.token }}"
@@ -175,7 +187,12 @@ pre-agent-steps:
           writeOutput();
         }
 concurrency:
-  group: "gh-aw-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}"
+  group: >-
+    gh-aw-${{ github.workflow }}-${{
+    github.event.pull_request.number ||
+    github.event.inputs.pull_request_number ||
+    fromJSON(github.event.inputs.aw_context || '{}').item_number ||
+    github.run_id }}
   cancel-in-progress: false
   queue: max
 engine: copilot
@@ -208,6 +225,7 @@ safe-outputs:
     max: 1
     target: >-
       ${{ github.event.pull_request.number ||
+      github.event.inputs.pull_request_number ||
       fromJSON(github.event.inputs.aw_context || '{}').item_number || '' }}
 ---
 
@@ -219,6 +237,9 @@ Diagnose a manifest validation failure on a `microsoft/winget-pkgs` pull request
 failure from the WinGet validation GitHub App's Check Run for the current head SHA, correlate it with
 the submitted manifest files, and post one concise author-facing comment only when the error supports
 a specific correction. Otherwise emit `noop`.
+
+For `workflow_dispatch`, inspect only the pull request supplied by `pull_request_number` or the
+agentic-workflow context, and apply all normal gates to its current state.
 
 This workflow is recommend-only. Never edit the pull request, approve, merge, close, label, waive,
 remove a label, or invoke wingetbot.
@@ -235,7 +256,7 @@ remove a label, or invoke wingetbot.
 - The pull request is authored by `wingetbot`.
 - None of these labels is currently present:
   `Manifest-Validation-Error`, `Manifest-Installer-Validation-Error`,
-  `Manifest-AppsAndFeaturesVersion-Error`, `Manifest-Singleton-Deprecated`.
+  `Manifest-AppsAndFeaturesVersion-Error`, `Manifest-Singleton-Deprecated`, `Unexpected-File`.
 - The pull request modifies more than one package or includes files outside one package's manifest
   version folder.
 - Any security or integrity-review label is present, including
@@ -248,7 +269,9 @@ remove a label, or invoke wingetbot.
   `Template: msftbot/authorAssist/manifestValidation` footer, then confirm that the comment body
   contains `Head SHA: <current full head SHA>`.
 - The relevant completed WinGetValidator Check Run cannot be identified, unless the
-  `Manifest-Singleton-Deprecated` label and changed manifest directly confirm a singleton manifest.
+  `Manifest-Singleton-Deprecated` label and changed manifest directly confirm a singleton manifest,
+  or `Unexpected-File` is the only target label and the changed-file list directly identifies the
+  unexpected file.
 - The Check Run says only that a manifest is invalid or validation failed without naming a concrete
   condition. This remains a mandatory `noop` even if inspecting the manifest suggests one or more
   likely errors, except for a directly confirmed singleton manifest.
@@ -278,18 +301,29 @@ or change this workflow's behavior.
    directly declares `ManifestType: singleton`, record a singleton finding and continue to the
    comment gate without requiring validation Check evidence. Do not infer singleton format from the
    number of files alone.
-3. Run `cat "/tmp/gh-aw/validation-checks.json"`. A deterministic pre-agent step fetched only Check
+3. If `Unexpected-File` is present, classify the pull request from its complete changed-file list:
+   - A manifest-only submission containing one or more non-manifest files in the affected package
+     version folder is a supported finding. Name only those exact files.
+   - A project, documentation, schema, policy, tooling, or workflow contribution is not an author
+     manifest mistake; emit `noop`.
+   - A mixed manifest and project contribution requires staff authorization. Do not tell the author
+     to delete intentional project files; emit `noop`.
+   - Any `.validation` file requires moderator review; emit `noop`.
+   This classification uses GitHub changed-file metadata only and does not require validation Check
+   evidence.
+4. For all other findings, run `cat "/tmp/gh-aw/validation-checks.json"`. A deterministic pre-agent
+   step fetched only Check
    Runs whose app slug is exactly `wingetvalidator-prod` and whose `head_sha` exactly matches the
    pull request's current full head SHA. It also required the completion output's
    `PullRequestNumber` to match the target and accepted failure checks only from the same validation
    `OperationId`. If `available` is false or the recorded PR number or head SHA does not match the
    target, emit `noop`.
-4. Select the failed Check Run in `checks` that corresponds to the active validation label. Use
+5. Select the failed Check Run in `checks` that corresponds to the active validation label. Use
    `completionCheck` only to confirm the operation and labels. If multiple failing checks conflict
    or no check names the active condition, emit `noop`.
-5. Extract only the relevant error lines from the selected Check Run's `output.title`,
+6. Extract only the relevant error lines from the selected Check Run's `output.title`,
    `output.summary`, and `output.text`, with their immediately surrounding context.
-6. Read the changed manifest files from the pull request to confirm the affected filename, path,
+7. Read the changed manifest files from the pull request to confirm the affected filename, path,
    field, `ManifestType`, and `ManifestVersion`.
 
 Except for a directly confirmed singleton manifest, the validation Check Run is the source of the
@@ -309,21 +343,25 @@ Comment only when the allowed evidence identifies at least one of:
    requires a multi-file manifest set containing, at minimum, a version manifest, a default-locale
    manifest, and an installer manifest. Link the authoring documentation:
    `https://github.com/microsoft/winget-pkgs/blob/master/doc/Authoring.md#what-next`.
-2. **Missing schema header.** Name each affected manifest file and explain that its first line must
+2. **Unexpected file in a manifest submission.** When the complete changed-file list proves that a
+   manifest-only pull request adds a non-manifest file inside one package version folder, name each
+   exact unexpected path and recommend removing it from the manifest submission. Do not require
+   validation Check evidence for this finding.
+3. **Missing schema header.** Name each affected manifest file and explain that its first line must
    contain the schema URL matching its `ManifestType` and declared `ManifestVersion`.
-3. **Filename mismatch.** Quote the actual filename and the expected filename from the log. Recommend
+4. **Filename mismatch.** Quote the actual filename and the expected filename from the log. Recommend
    the expected filename only; do not suggest changing manifest identity fields to preserve the
    incorrect filename.
-4. **Package path mismatch.** Quote the actual and expected package paths from the log. Recommend the
+5. **Package path mismatch.** Quote the actual and expected package paths from the log. Recommend the
    expected path only; do not suggest changing `PackageIdentifier` or `PackageVersion` to preserve the
    incorrect path unless the log explicitly identifies that field value as the error.
-5. **Named schema violation.** Identify the field and the expected type, enum, required property, or
+6. **Named schema violation.** Identify the field and the expected type, enum, required property, or
    allowed structure stated by the log or the matching declared-version schema.
-6. **Installer metadata inconsistency.** Name the field identified by the log. For an optional field
+7. **Installer metadata inconsistency.** Name the field identified by the log. For an optional field
    reported missing, include the service-provided value only when it is not a URL, hash, token, or
    other sensitive value. For `SignatureSha256`, say it differs from scanned installer metadata but
    never reproduce the hash.
-7. **Apps and Features version overlap.** State that the submitted `DisplayVersion` overlaps the
+8. **Apps and Features version overlap.** State that the submitted `DisplayVersion` overlaps the
    published index range quoted by the log. Recommend verifying the actual installed display version,
    removing the entry if it merely duplicates package metadata, or correcting it to the unique value.
    Do not assert which option is correct without evidence.
@@ -338,6 +376,8 @@ Deduplicate repeated identical errors emitted once per manifest file. Preserve d
 - `Manifest-Version-Deprecated` or other sibling-label conditions outside this workflow's four
   target labels.
 - A condition that requires inspecting or executing the installer.
+- An `Unexpected-File` pull request containing project-level changes, mixed manifest/project intent,
+  or any `.validation` file.
 - A guessed correction not supported by the log, manifest, or matching schema.
 - An issue already explained specifically by a human on the current head.
 
@@ -365,7 +405,8 @@ Post one concise comment:
 > an experimental assistant to help diagnose a manifest validation result. It is advisory only and
 > may be wrong. Feedback: [share it in this discussion](https://github.com/microsoft/winget-pkgs/discussions/412469).
 >
-> The validation log identified the following manifest issue:
+> `<For Unexpected-File: The changed-file list identified the following unexpected file. For all
+> other classes: The validation log identified the following manifest issue:>`
 >
 > - **`<file or field>`:** `<specific error and supported correction>`.
 >
@@ -387,7 +428,8 @@ model names, token usage, workflow internals, installer URLs, or hashes. Include
 the manifest and rerun validation only once. Do not add a `Template:` line; Safe Outputs appends the
 canonical workflow footer automatically. For a directly confirmed singleton manifest, omit the
 validation-check line when no matching Check Run is available and use the authoring-documentation URL as
-the relevant reference.
+the relevant reference. For an `Unexpected-File` finding, rename the details summary to
+`Changed-file evidence`, omit the validation-check line, and include the exact unexpected path.
 
 ## Hard rules
 
@@ -398,5 +440,6 @@ the relevant reference.
 - Never handle security findings.
 - Never comment on wingetbot-authored pull requests.
 - Never reverse-engineer a diagnosis from manifest contents when the validation log is generic.
-- Only bypass validation Check Run evidence requirements for a directly confirmed singleton manifest.
+- Only bypass validation Check Run evidence requirements for a directly confirmed singleton manifest
+  or a clean manifest-only `Unexpected-File` finding.
 - If uncertain, emit `noop`.
