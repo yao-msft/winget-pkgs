@@ -9,16 +9,25 @@ description: >-
 on:
   pull_request_target:
     types: [labeled]
+  workflow_dispatch:
+    inputs:
+      pull_request_number:
+        description: Pull request number for a targeted transition-assist pilot
+        required: false
+        type: string
   roles: [admin, maintainer, write]
 if: >-
-  github.event_name == 'pull_request_target' &&
-  github.event.action == 'labeled' &&
-  github.event.pull_request.user.login != 'wingetbot' &&
+  github.event_name == 'workflow_dispatch' ||
   (
-    github.event.label.name == 'Manifest-Validation-Error' ||
-    github.event.label.name == 'Manifest-Installer-Validation-Error' ||
-    github.event.label.name == 'Manifest-AppsAndFeaturesVersion-Error' ||
-    github.event.label.name == 'Manifest-Singleton-Deprecated'
+    github.event_name == 'pull_request_target' &&
+    github.event.action == 'labeled' &&
+    github.event.pull_request.user.login != 'wingetbot' &&
+    (
+      github.event.label.name == 'Manifest-Validation-Error' ||
+      github.event.label.name == 'Manifest-Installer-Validation-Error' ||
+      github.event.label.name == 'Manifest-AppsAndFeaturesVersion-Error' ||
+      github.event.label.name == 'Manifest-Singleton-Deprecated'
+    )
   )
 checkout: false
 pre-agent-steps:
@@ -26,7 +35,9 @@ pre-agent-steps:
     uses: actions/github-script@v9
     env:
       TARGET_PR: >-
-        ${{ github.event.pull_request.number || '' }}
+        ${{ github.event.pull_request.number ||
+        github.event.inputs.pull_request_number ||
+        fromJSON(github.event.inputs.aw_context || '{}').item_number || '' }}
       TRIGGER_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
     with:
       github-token: "${{ github.token }}"
@@ -175,7 +186,12 @@ pre-agent-steps:
           writeOutput();
         }
 concurrency:
-  group: "gh-aw-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}"
+  group: >-
+    gh-aw-${{ github.workflow }}-${{
+    github.event.pull_request.number ||
+    github.event.inputs.pull_request_number ||
+    fromJSON(github.event.inputs.aw_context || '{}').item_number ||
+    github.run_id }}
   cancel-in-progress: false
   queue: max
 engine: copilot
@@ -208,6 +224,7 @@ safe-outputs:
     max: 1
     target: >-
       ${{ github.event.pull_request.number ||
+      github.event.inputs.pull_request_number ||
       fromJSON(github.event.inputs.aw_context || '{}').item_number || '' }}
 ---
 
@@ -219,6 +236,10 @@ Diagnose a manifest validation failure on a `microsoft/winget-pkgs` pull request
 failure from the WinGet validation GitHub App's Check Run for the current head SHA, correlate it with
 the submitted manifest files, and post one concise author-facing comment only when the error supports
 a specific correction. Otherwise emit `noop`.
+
+For a targeted `workflow_dispatch` pilot, inspect only the pull request number supplied by
+`pull_request_number` or the agentic-workflow context. Apply all normal eligibility, current-head,
+author, label, and evidence gates to its current state.
 
 This workflow is recommend-only. Never edit the pull request, approve, merge, close, label, waive,
 remove a label, or invoke wingetbot.
@@ -232,6 +253,9 @@ remove a label, or invoke wingetbot.
 
 - For `pull_request_target`, the trusted label-event head SHA is missing or does not exactly match
   the pull request's current full head SHA.
+- For `workflow_dispatch`, no valid target pull request is available from `pull_request_number` or
+  the agentic-workflow context, or the current pull request does not have
+  `Manifest-AppsAndFeaturesVersion-Error`.
 - The pull request is authored by `wingetbot`.
 - None of these labels is currently present:
   `Manifest-Validation-Error`, `Manifest-Installer-Validation-Error`,
@@ -324,9 +348,21 @@ Comment only when the allowed evidence identifies at least one of:
    other sensitive value. For `SignatureSha256`, say it differs from scanned installer metadata but
    never reproduce the hash.
 7. **Apps and Features version overlap.** State that the submitted `DisplayVersion` overlaps the
-   published index range quoted by the log. Recommend verifying the actual installed display version,
-   removing the entry if it merely duplicates package metadata, or correcting it to the unique value.
-   Do not assert which option is correct without evidence.
+   published index range quoted by the Check Run, then classify the pull request into exactly one of:
+   - `DISPLAY_VERSION_INCORRECT`: the Check Run and exact-version publisher evidence establish that
+     the submitted value is wrong. Recommend only the supported value.
+   - `DISPLAY_VERSION_UNKNOWN`: the overlap is established but no authoritative source proves a
+     replacement. Explain what must be verified; never guess that it equals `PackageVersion`.
+   - `INDEX_TRANSITION_REQUIRED`: the changed files and repository state show that an older manifest
+     must publish as removed before the replacement can be accepted. Explain the ordering and link
+     the related removal or replacement pull request when one exists.
+   - `REMOVAL_TRANSITION_IN_PROGRESS`: the pull request is removal-only and the overlapping value
+     occurs only in deleted content. Explain that the removal is the transition step and do not ask
+     the author to edit deleted content.
+
+   Before classifying, determine whether the diff is an addition/update, removal-only, or mixed
+   change. Inspect existing manifests and related open removal or replacement pull requests for the
+   same `PackageIdentifier`. If those sources do not uniquely establish one class, emit `noop`.
 
 Deduplicate repeated identical errors emitted once per manifest file. Preserve distinct errors.
 
@@ -338,6 +374,10 @@ Deduplicate repeated identical errors emitted once per manifest file. Preserve d
 - `Manifest-Version-Deprecated` or other sibling-label conditions outside this workflow's four
   target labels.
 - A condition that requires inspecting or executing the installer.
+- An Apps and Features replacement value inferred from `PackageVersion`, installer filename, or
+  deleted content.
+- A claimed index transition without repository state or related pull-request evidence proving the
+  required publication order.
 - A guessed correction not supported by the log, manifest, or matching schema.
 - An issue already explained specifically by a human on the current head.
 
@@ -399,4 +439,6 @@ the relevant reference.
 - Never comment on wingetbot-authored pull requests.
 - Never reverse-engineer a diagnosis from manifest contents when the validation log is generic.
 - Only bypass validation Check Run evidence requirements for a directly confirmed singleton manifest.
+- Never ask an author to edit a `DisplayVersion` that appears only in deleted content.
+- Never claim `DisplayVersion` should equal `PackageVersion`.
 - If uncertain, emit `noop`.
