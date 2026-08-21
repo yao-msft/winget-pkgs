@@ -43,11 +43,14 @@ safe-outputs:
     footer: "###### Template: msftbot/review/spdxLicense by [{workflow_name}]({run_url})"
   threat-detection: true
   report-failure-as-issue: false
+  report-incomplete:
+    create-issue: false
   missing-tool: false
   missing-data: false
   noop:
     report-as-issue: false
   add-comment:
+    issues: false
     max: 1
     target: >-
       ${{ github.event.inputs.pull_request_number ||
