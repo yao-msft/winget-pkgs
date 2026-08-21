@@ -1,0 +1,136 @@
+name: Highest-Version Removal Reconciliation
+
+on:
+  schedule:
+    - cron: "37 11 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  audit:
+    name: Audit stale removal labels
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find deterministic reconciliation candidates
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const defaultBranch = context.payload.repository?.default_branch ?? "master";
+            const numericVersion = /^\d+(?:\.\d+)*$/;
+
+            function compareNumericVersions(left, right) {
+              const a = left.split(".").map(Number);
+              const b = right.split(".").map(Number);
+              const length = Math.max(a.length, b.length);
+              for (let index = 0; index < length; index++) {
+                const difference = (a[index] ?? 0) - (b[index] ?? 0);
+                if (difference !== 0) {
+                  return Math.sign(difference);
+                }
+              }
+              return 0;
+            }
+
+            const search = await github.paginate(github.rest.search.issuesAndPullRequests, {
+              q: `repo:${owner}/${repo} is:pr is:open label:Highest-Version-Removal`,
+              per_page: 100,
+            });
+
+            const candidates = [];
+            const skipped = [];
+
+            for (const item of search) {
+              const files = await github.paginate(github.rest.pulls.listFiles, {
+                owner,
+                repo,
+                pull_number: item.number,
+                per_page: 100,
+              });
+
+              if (files.length === 0 || files.some((file) => file.status !== "removed")) {
+                skipped.push(`#${item.number}: not removal-only`);
+                continue;
+              }
+
+              const versionFolders = new Set();
+              for (const file of files) {
+                const match = file.filename.match(
+                  /^(manifests\/[^/]+\/.+)\/([^/]+)\/[^/]+\.ya?ml$/,
+                );
+                if (!match) {
+                  versionFolders.add("invalid");
+                  break;
+                }
+                versionFolders.add(`${match[1]}\n${match[2]}`);
+              }
+
+              if (versionFolders.size !== 1 || versionFolders.has("invalid")) {
+                skipped.push(`#${item.number}: files are not one manifest version folder`);
+                continue;
+              }
+
+              const [packagePath, removedVersion] = [...versionFolders][0].split("\n");
+              if (!numericVersion.test(removedVersion)) {
+                skipped.push(`#${item.number}: non-numeric version requires human review`);
+                continue;
+              }
+
+              let entries;
+              try {
+                const response = await github.rest.repos.getContent({
+                  owner,
+                  repo,
+                  path: packagePath,
+                  ref: defaultBranch,
+                });
+                entries = Array.isArray(response.data) ? response.data : [];
+              } catch (error) {
+                skipped.push(`#${item.number}: package path unavailable on ${defaultBranch}`);
+                continue;
+              }
+
+              const newerVersions = entries
+                .filter((entry) => entry.type === "dir" && numericVersion.test(entry.name))
+                .map((entry) => entry.name)
+                .filter((version) => compareNumericVersions(version, removedVersion) > 0)
+                .sort(compareNumericVersions);
+
+              if (newerVersions.length > 0) {
+                candidates.push({
+                  number: item.number,
+                  packagePath,
+                  removedVersion,
+                  newestVersion: newerVersions.at(-1),
+                });
+              }
+            }
+
+            await core.summary
+              .addHeading("Highest-Version-Removal reconciliation audit")
+              .addRaw(
+                "This first version is audit-only. It does not remove labels or modify pull requests.",
+              )
+              .addHeading("Deterministic candidates", 2)
+              .addTable([
+                [
+                  { data: "Pull request", header: true },
+                  { data: "Package path", header: true },
+                  { data: "Removed version", header: true },
+                  { data: "Newer version", header: true },
+                ],
+                ...candidates.map((candidate) => [
+                  `#${candidate.number}`,
+                  candidate.packagePath,
+                  candidate.removedVersion,
+                  candidate.newestVersion,
+                ]),
+              ])
+              .addHeading("Skipped for human review", 2)
+              .addList(skipped.length > 0 ? skipped : ["None"])
+              .write();
