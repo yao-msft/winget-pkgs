@@ -24,7 +24,12 @@ if: >-
   )
 checkout: false
 concurrency:
-  group: "gh-aw-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}"
+  group: >-
+    gh-aw-${{ github.workflow }}-${{
+    github.event.pull_request.number ||
+    github.event.inputs.pull_request_number ||
+    fromJSON(github.event.inputs.aw_context || '{}').item_number ||
+    github.run_id }}
   cancel-in-progress: false
   queue: max
 engine: copilot
@@ -117,9 +122,9 @@ names, installer filenames, or a different release.
   claim in the submitted description.
 - `WRONG_RELEASE_VERSION`: release notes explicitly identify a version different from
   `PackageVersion`.
-- `UNSUPPORTED_LICENSE_CLAIM`: the manifest claims one specific open-source license, the exact tagged
-  source is inspectable, and its explicit license grant names a different license or no publisher
-  license grant exists. Absence alone is not enough unless the entire exact tag was inspected.
+- `UNSUPPORTED_LICENSE_CLAIM`: the manifest claims one specific open-source license and affirmative
+  exact-version publisher evidence explicitly identifies a different license. Missing license
+  material, absence of a grant, and failed lookups require `NOOP`.
 - `UNRELATED_DOCUMENTATION`: the submitted documentation explicitly belongs to another product or
   version.
 
