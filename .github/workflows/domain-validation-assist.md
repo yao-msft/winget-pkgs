@@ -54,6 +54,8 @@ safe-outputs:
     footer: "###### Template: msftbot/authorAssist/domainValidation by [{workflow_name}]({run_url})"
   threat-detection: true
   report-failure-as-issue: false
+  missing-tool: false
+  missing-data: false
   noop:
     report-as-issue: false
   add-comment:
@@ -76,6 +78,11 @@ otherwise emit `noop`.
 
 For `workflow_dispatch`, inspect only the pull request supplied by `pull_request_number` or the
 agentic-workflow context and apply every normal gate to its current state.
+
+## Trusted trigger context
+
+- Event: `${{ github.event_name }}`
+- Label-event head SHA: `${{ github.event.pull_request.head.sha || '' }}`
 
 ## Gate - emit `noop` immediately when
 
