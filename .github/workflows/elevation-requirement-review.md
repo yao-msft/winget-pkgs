@@ -52,11 +52,14 @@ safe-outputs:
     footer: "###### Template: msftbot/authorAssist/elevationRequirement by [{workflow_name}]({run_url})"
   threat-detection: true
   report-failure-as-issue: false
+  report-incomplete:
+    create-issue: false
   missing-tool: false
   missing-data: false
   noop:
     report-as-issue: false
   add-comment:
+    issues: false
     max: 1
     target: >-
       ${{ github.event.pull_request.number ||
