@@ -34,6 +34,8 @@ tools:
 safe-outputs:
   threat-detection: true
   report-failure-as-issue: false
+  report-incomplete:
+    create-issue: false
   missing-tool: false
   missing-data: false
   noop:
