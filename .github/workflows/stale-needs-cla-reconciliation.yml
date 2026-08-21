@@ -1,0 +1,125 @@
+name: Stale Needs-CLA Reconciliation
+
+on:
+  schedule:
+    - cron: "17 12 * * *"
+  workflow_dispatch:
+
+permissions:
+  checks: read
+  contents: read
+  pull-requests: read
+
+jobs:
+  audit:
+    name: Audit stale Needs-CLA labels
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find authoritative CLA reconciliation candidates
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          CLA_AUTHORITATIVE_CHECK_NAME: ${{ vars.CLA_AUTHORITATIVE_CHECK_NAME }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const checkName = String(
+              process.env.CLA_AUTHORITATIVE_CHECK_NAME ?? "",
+            ).trim();
+
+            if (!checkName) {
+              await core.summary
+                .addHeading("Stale Needs-CLA reconciliation audit")
+                .addRaw(
+                  "Blocked: repository variable `CLA_AUTHORITATIVE_CHECK_NAME` is not configured. " +
+                    "No CLA signal was inferred and no pull request was modified.",
+                )
+                .write();
+              return;
+            }
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const search = await github.paginate(
+              github.rest.search.issuesAndPullRequests,
+              {
+                q: `repo:${owner}/${repo} is:pr is:open label:Needs-CLA`,
+                per_page: 100,
+              },
+            );
+
+            const candidates = [];
+            const unresolved = [];
+
+            for (const item of search) {
+              const pull = await github.rest.pulls.get({
+                owner,
+                repo,
+                pull_number: item.number,
+              });
+              const headSha = pull.data.head.sha;
+              const checkRuns = await github.paginate(
+                github.rest.checks.listForRef,
+                {
+                  owner,
+                  repo,
+                  ref: headSha,
+                  per_page: 100,
+                },
+                (response) => response.data.check_runs,
+              );
+              const authoritative = checkRuns
+                .filter((check) => check.name === checkName)
+                .sort(
+                  (left, right) =>
+                    new Date(right.completed_at ?? right.started_at ?? 0) -
+                    new Date(left.completed_at ?? left.started_at ?? 0),
+                )[0];
+
+              if (!authoritative) {
+                unresolved.push(`#${item.number}: authoritative check not found`);
+                continue;
+              }
+
+              if (
+                authoritative.status === "completed" &&
+                authoritative.conclusion === "success"
+              ) {
+                candidates.push({
+                  number: item.number,
+                  author: pull.data.user.login,
+                  headSha,
+                  checkUrl: authoritative.html_url,
+                });
+              } else {
+                unresolved.push(
+                  `#${item.number}: authoritative check is ` +
+                    `${authoritative.status}/${authoritative.conclusion ?? "none"}`,
+                );
+              }
+            }
+
+            await core.summary
+              .addHeading("Stale Needs-CLA reconciliation audit")
+              .addRaw(
+                "This policy-gated first version is audit-only. It does not infer CLA status from " +
+                  "comments, contribution history, other pull requests, or merges, and it does not " +
+                  "remove labels.",
+              )
+              .addHeading("Authoritative success candidates", 2)
+              .addTable([
+                [
+                  { data: "Pull request", header: true },
+                  { data: "Author", header: true },
+                  { data: "Head SHA", header: true },
+                  { data: "CLA check", header: true },
+                ],
+                ...candidates.map((candidate) => [
+                  `#${candidate.number}`,
+                  candidate.author,
+                  candidate.headSha,
+                  candidate.checkUrl,
+                ]),
+              ])
+              .addHeading("Unresolved", 2)
+              .addList(unresolved.length > 0 ? unresolved : ["None"])
+              .write();
