@@ -28,7 +28,12 @@ if: >-
   )
 checkout: false
 concurrency:
-  group: "gh-aw-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}"
+  group: >-
+    gh-aw-${{ github.workflow }}-${{
+    github.event.pull_request.number ||
+    github.event.inputs.pull_request_number ||
+    fromJSON(github.event.inputs.aw_context || '{}').item_number ||
+    github.run_id }}
   cancel-in-progress: false
   queue: max
 engine: copilot
