@@ -49,6 +49,8 @@ safe-outputs:
     footer: "###### Template: msftbot/authorAssist/newPackageMetadata by [{workflow_name}]({run_url})"
   threat-detection: true
   report-failure-as-issue: false
+  missing-tool: false
+  missing-data: false
   noop:
     report-as-issue: false
   add-comment:
@@ -73,11 +75,17 @@ Reviewed fields are `ShortDescription`, `Description`, `License`, `LicenseUrl`, 
 For `workflow_dispatch`, inspect only the PR supplied by `pull_request_number` or the
 agentic-workflow context and apply every normal gate to its current state.
 
+## Trusted trigger context
+
+- Event: `${{ github.event_name }}`
+- Label-event head SHA: `${{ github.event.pull_request.head.sha || '' }}`
+
 ## Gate - emit `noop` immediately when
 
 - The PR is missing, closed, authored by `wingetbot`, lacks `New-Package`, changes more than one
   package, or includes project files.
-- The full current head SHA cannot be established or does not match the trusted label-event SHA.
+- The full current head SHA cannot be established.
+- For `pull_request_target`, the current full head SHA does not match the trusted label-event SHA.
 - Any security or integrity-review label is present.
 - A human already gave specific metadata feedback for the current head SHA.
 - This workflow already commented for the current head SHA, identified by the
