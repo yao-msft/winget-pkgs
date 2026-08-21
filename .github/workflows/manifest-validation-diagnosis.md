@@ -216,11 +216,14 @@ safe-outputs:
     footer: "###### Template: msftbot/authorAssist/manifestValidation by [{workflow_name}]({run_url})"
   threat-detection: true
   report-failure-as-issue: false
+  report-incomplete:
+    create-issue: false
   noop:
     report-as-issue: false
   missing-tool: false
   missing-data: false
   add-comment:
+    issues: false
     max: 1
     target: >-
       ${{ github.event.pull_request.number ||
