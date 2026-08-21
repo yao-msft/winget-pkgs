@@ -34,8 +34,20 @@ tools:
 safe-outputs:
   threat-detection: true
   report-failure-as-issue: false
+  missing-tool: false
+  missing-data: false
   noop:
     report-as-issue: false
+  jobs:
+    record-pilot-completion:
+      description: Record that the private pilot completed without publishing evidence
+      runs-on: ubuntu-latest
+      output: Private pilot completion recorded
+      permissions:
+        contents: read
+      steps:
+        - name: Record private completion
+          run: echo "Pilot completed without public output." >> "$GITHUB_STEP_SUMMARY"
 ---
 
 # Transient Security Check Explanation (Research Pilot)
@@ -49,6 +61,14 @@ public comment capability.
 
 No transient signature is approved yet. The purpose of this branch is to establish the evidence
 contract and regression taxonomy before any author-facing workflow is permitted.
+
+## Trusted target
+
+- Dispatch pull request input: `${{ github.event.inputs.pull_request_number }}`
+- Agentic-workflow context: `${{ github.event.inputs.aw_context }}`
+
+Use the explicit dispatch input first. If it is empty, parse `item_number` from the
+agentic-workflow context.
 
 ## Gate
 
