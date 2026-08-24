@@ -13,6 +13,118 @@ on:
         required: false
         type: string
 checkout: false
+pre-agent-steps:
+  - name: Fetch trusted validation Check Runs
+    uses: actions/github-script@v9
+    env:
+      TARGET_PR: >-
+        ${{ github.event.inputs.pull_request_number ||
+        fromJSON(github.event.inputs.aw_context || '{}').item_number || '' }}
+    with:
+      github-token: "${{ github.token }}"
+      script: |
+        const fs = require("fs");
+        const outputPath = "/tmp/gh-aw/validation-checks.json";
+        fs.mkdirSync("/tmp/gh-aw", { recursive: true });
+
+        const owner = "microsoft";
+        const repo = "winget-pkgs";
+        const pullRequestNumber = Number(process.env.TARGET_PR);
+        const output = {
+          available: false,
+          pullRequestNumber,
+          headSha: null,
+          completionCheck: null,
+          checks: [],
+        };
+        const writeOutput = () =>
+          fs.writeFileSync(outputPath, JSON.stringify(output));
+
+        if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber <= 0) {
+          output.reason = "The targeted pull request number is invalid.";
+          writeOutput();
+          return;
+        }
+
+        try {
+          const pull = await github.rest.pulls.get({
+            owner,
+            repo,
+            pull_number: pullRequestNumber,
+          });
+          const headSha = pull.data.head.sha;
+          output.headSha = headSha;
+
+          let checkRuns = [];
+          let failedChecks = [];
+          for (let attempt = 0; attempt < 2; attempt++) {
+            checkRuns = await github.paginate(
+              github.rest.checks.listForRef,
+              {
+                owner,
+                repo,
+                ref: headSha,
+                filter: "latest",
+                per_page: 100,
+              },
+              (response) => response.data.check_runs,
+            );
+            failedChecks = checkRuns.filter((check) =>
+              check.app?.slug === "wingetvalidator-prod" &&
+              check.head_sha === headSha &&
+              ["failure", "timed_out", "action_required"].includes(
+                String(check.conclusion ?? "").toLowerCase(),
+              )
+            );
+            if (failedChecks.length > 0 || attempt === 1) {
+              break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 10000));
+          }
+
+          const redactText = (value) => String(value ?? "")
+            .replace(/https?:\/\/[^\s"'<>]+/gi, "[URL REDACTED]")
+            .replace(/\b[A-Fa-f0-9]{64}\b/g, "[HASH REDACTED]")
+            .replace(/\b[A-Z]:\\[^\r\n]*/gi, "[PATH REDACTED]")
+            .replace(
+              /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi,
+              "[EMAIL REDACTED]",
+            );
+          const completionCheck = checkRuns.find((check) =>
+            check.app?.slug === "wingetvalidator-prod" &&
+            check.head_sha === headSha &&
+            check.name === "10. Validation Completed"
+          ));
+          const mapCheck = (check) => ({
+            id: check.id,
+            name: check.name,
+            status: check.status,
+            conclusion: check.conclusion,
+            startedAt: check.started_at,
+            completedAt: check.completed_at,
+            url: check.html_url,
+            output: {
+              title: redactText(check.output?.title),
+              summary: redactText(check.output?.summary),
+              text: redactText(check.output?.text).slice(0, 12000),
+            },
+          });
+          output.completionCheck = completionCheck
+            ? mapCheck(completionCheck)
+            : null;
+          output.checks = failedChecks.slice(0, 5).map(mapCheck);
+          output.available = output.checks.length > 0;
+          if (!output.available) {
+            output.reason =
+              "No failing WinGetValidator Check Run was found for the current head SHA.";
+          }
+        } catch (error) {
+          output.reason = `Validation Check retrieval failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`;
+        } finally {
+          writeOutput();
+        }
 concurrency:
   group: >-
     gh-aw-${{ github.workflow }}-${{
@@ -23,6 +135,7 @@ concurrency:
   queue: max
 engine: copilot
 permissions:
+  checks: read
   contents: read
   issues: read
   pull-requests: read
@@ -30,15 +143,13 @@ permissions:
 network:
   allowed:
     - defaults
-    - "dev.azure.com"
 tools:
   github:
     toolsets: [context, repos, issues, pull_requests]
     allowed-repos:
-      - "${{ github.repository }}"
+      - "microsoft/winget-pkgs"
     min-integrity: none
-  web-fetch:
-  bash: ["echo", "grep", "sed", "cut", "head", "tail"]
+  bash: ["cat", "echo", "grep", "head", "tail"]
 safe-outputs:
   messages:
     footer: "###### Template: msftbot/moderatorAssist/unattendedScreenshot by [{workflow_name}]({run_url})"
@@ -63,11 +174,11 @@ safe-outputs:
 ## Task
 
 Perform a manual moderator-assist feasibility review for one pull request currently labeled
-`Validation-Unattended-Failed`. Determine whether its matching validation run exposes safe textual
-evidence and whether screenshot artifacts are referenced. Never retrieve or inspect screenshot
+`Validation-Unattended-Failed`. Determine whether its matching WinGetValidator Check exposes safe
+textual evidence and whether screenshot artifacts are referenced. Never retrieve or inspect screenshot
 bytes in this pilot.
 
-Post one moderator breadcrumb only when the public log itself contains a specific, non-sensitive
+Post one moderator breadcrumb only when the redacted Check output contains a specific, non-sensitive
 error that is useful without viewing the screenshot. Otherwise emit `noop`.
 
 ## Gate - emit `noop` immediately when
@@ -75,7 +186,8 @@ error that is useful without viewing the screenshot. Otherwise emit `noop`.
 - No valid target PR is available from `pull_request_number` or the agentic-workflow context.
 - The PR is closed, changes more than one package, or lacks `Validation-Unattended-Failed`.
 - Any security or integrity-review label is present.
-- The current full head SHA, matching ADO build, or PR-number binding cannot be established.
+- The current full head SHA, matching WinGetValidator Check Run, or PR-number binding cannot be
+  established.
 - A human moderator already diagnosed the unattended failure for the current head SHA.
 - This workflow already commented for the current head SHA, identified by its
   `Template: msftbot/moderatorAssist/unattendedScreenshot` footer and `Head SHA` detail.
@@ -98,18 +210,21 @@ redaction stage prove that sensitive content cannot reach the model or public ou
 ## Evidence collection
 
 1. Read PR metadata, labels, current full head SHA, comments, and changed manifest paths.
-2. Find the latest wingetbot Validation Pipeline link.
-3. Read public ADO build metadata and require `WinGetPullRequestNumber` to match the PR.
-4. Read only the failed unattended-validation task's textual log.
-5. Record whether the log references screenshot artifacts, but record artifact counts and generic
+2. Run `cat "/tmp/gh-aw/validation-checks.json"`. Require the recorded PR number and full head SHA to
+   match the target, and require a failed Check Run from app slug `wingetvalidator-prod` whose output
+   explicitly reports the unattended-validation failure. Use `completionCheck` only to confirm the
+   operation and labels. If evidence is unavailable, generic, stale, or conflicting, emit `noop`.
+3. Read only the selected Check Run's deterministically redacted `output.title`, `output.summary`,
+   and `output.text`. Never attempt to recover redacted values.
+4. Record whether the Check output references screenshot artifacts, but record artifact counts and generic
    file extensions only.
-6. Extract a finding only when the text log states a concrete non-sensitive condition such as an
+5. Extract a finding only when the Check output states a concrete non-sensitive condition such as an
    installer process exit code or named unattended timeout. Redact user names, machine names, paths,
    tokens, and URLs.
 
 ## Classifier
 
-- `TEXT_DIAGNOSIS_AVAILABLE`: the textual log independently establishes one specific failure.
+- `TEXT_DIAGNOSIS_AVAILABLE`: the redacted Check output independently establishes one specific failure.
 - `SCREENSHOT_REQUIRED`: useful evidence exists only in the screenshot; emit `noop`.
 - `SENSITIVE_OR_AMBIGUOUS`: text may expose sensitive data or does not establish one cause; emit
   `noop`.
@@ -132,7 +247,7 @@ redaction stage prove that sensitive content cannot reach the model or public ou
 > - **Screenshot reference present:** `<yes or no>`
 > - **Text evidence:** `<redacted log fact>`
 > - **Head SHA:** `<full head SHA>`
-> - **Validation run:** `<ADO build URL>`
+> - **Validation check:** `<exact WinGetValidator Check Run name and GitHub URL>`
 > </details>
 
 Do not add a `Template:` line; SafeOutputs appends it.
