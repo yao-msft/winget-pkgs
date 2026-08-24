@@ -70,7 +70,7 @@ pre-agent-steps:
               (response) => response.data.check_runs,
             );
             trustedChecks = checkRuns.filter((check) =>
-              check.app?.slug === "wingetvalidator-prod" &&
+              check?.app?.slug === "wingetvalidator-prod" &&
               check.head_sha === headSha
             );
             failedChecks = trustedChecks.filter((check) =>
