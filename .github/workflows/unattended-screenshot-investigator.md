@@ -70,7 +70,7 @@ pre-agent-steps:
               (response) => response.data.check_runs,
             );
             failedChecks = checkRuns.filter((check) =>
-              check.app?.slug === "wingetvalidator-prod" &&
+              check?.app?.slug === "wingetvalidator-prod" &&
               check.head_sha === headSha &&
               ["failure", "timed_out", "action_required"].includes(
                 String(check.conclusion ?? "").toLowerCase(),
@@ -91,7 +91,7 @@ pre-agent-steps:
               "[EMAIL REDACTED]",
             );
           const completionCheck = checkRuns.find((check) =>
-            check.app?.slug === "wingetvalidator-prod" &&
+            check?.app?.slug === "wingetvalidator-prod" &&
             check.head_sha === headSha &&
             check.name === "10. Validation Completed"
           );
