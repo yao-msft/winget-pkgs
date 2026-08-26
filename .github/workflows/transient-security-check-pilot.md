@@ -59,16 +59,43 @@ pre-agent-steps:
           let trustedChecks = [];
           let failedChecks = [];
           let boundOperations = [];
+          let historyComplete = false;
           for (let attempt = 0; attempt < 2; attempt++) {
-            const response = await github.rest.checks.listForRef({
-              owner,
-              repo,
-              ref: headSha,
-              app_id: 1451866,
-              filter: "all",
-              per_page: 100,
-            });
-            const checkRuns = response.data.check_runs ?? [];
+            historyComplete = false;
+            const checkRuns = [];
+            let totalCount = null;
+            for (let page = 1; page <= 5; page++) {
+              const response = await github.rest.checks.listForRef({
+                owner,
+                repo,
+                ref: headSha,
+                app_id: 1451866,
+                filter: "all",
+                per_page: 100,
+                page,
+              });
+              if (page === 1) {
+                totalCount = response.data.total_count;
+                if (
+                  !Number.isSafeInteger(totalCount) ||
+                  totalCount < 0 ||
+                  totalCount > 500
+                ) {
+                  break;
+                }
+              }
+              checkRuns.push(...(response.data.check_runs ?? []));
+              if (checkRuns.length >= totalCount) {
+                historyComplete = true;
+                break;
+              }
+            }
+            if (!historyComplete) {
+              if (attempt === 0) {
+                await new Promise((resolve) => setTimeout(resolve, 10000));
+              }
+              continue;
+            }
             const trustedCandidates = checkRuns.filter((check) =>
               check?.app?.slug === "wingetvalidator-prod" &&
               check.head_sha === headSha &&
@@ -162,6 +189,11 @@ pre-agent-steps:
             await new Promise((resolve) => setTimeout(resolve, 10000));
           }
 
+          if (!historyComplete) {
+            output.reason =
+              "Validation Check history is incomplete or exceeds the bounded retrieval limit.";
+            return;
+          }
           if (boundOperations.length === 0) {
             output.reason =
               "No completed validation operation was bound to the target pull request.";
