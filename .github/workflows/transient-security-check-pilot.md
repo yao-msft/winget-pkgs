@@ -115,17 +115,22 @@ pre-agent-steps:
               const completionOperationId = String(
                 completionPayload?.OperationId ?? "",
               ).trim();
+              const completionTimestamp = Date.parse(
+                completionChecks[0].completed_at ?? "",
+              );
               if (
                 !Number.isSafeInteger(completionPullRequestNumber) ||
                 completionPullRequestNumber <= 0 ||
                 completionPullRequestNumber !== pullRequestNumber ||
                 !completionOperationId ||
-                completionOperationId !== externalId
+                completionOperationId !== externalId ||
+                !Number.isFinite(completionTimestamp)
               ) {
                 continue;
               }
               boundOperations.push({
                 completedAt: completionChecks[0].completed_at,
+                completedTimestamp: completionTimestamp,
                 operationId: completionOperationId,
                 pullRequestNumber: completionPullRequestNumber,
               });
@@ -189,6 +194,12 @@ pre-agent-steps:
             },
           });
           const failedNames = new Set(failedChecks.map((check) => check.name));
+          const operationCompletionTimes = new Map(
+            boundOperations.map((operation) => [
+              operation.operationId,
+              operation.completedTimestamp,
+            ]),
+          );
           output.checks = failedChecks.slice(0, 5).map(mapCheck);
           output.laterSuccessfulChecks = trustedChecks
             .filter((check) =>
@@ -196,8 +207,9 @@ pre-agent-steps:
               failedNames.has(check.name) &&
               failedChecks.some((failed) =>
                 failed.name === check.name &&
-                Date.parse(check.completed_at ?? "") >
-                  Date.parse(failed.completed_at ?? "")
+                check.external_id !== failed.external_id &&
+                operationCompletionTimes.get(check.external_id) >
+                  operationCompletionTimes.get(failed.external_id)
               )
             )
             .slice(0, 5)
