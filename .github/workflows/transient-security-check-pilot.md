@@ -62,7 +62,8 @@ pre-agent-steps:
           let historyComplete = false;
           for (let attempt = 0; attempt < 2; attempt++) {
             historyComplete = false;
-            const checkRuns = [];
+            const checkRunsById = new Map();
+            let firstPageIds = [];
             let totalCount = null;
             for (let page = 1; page <= 5; page++) {
               const response = await github.rest.checks.listForRef({
@@ -83,12 +84,39 @@ pre-agent-steps:
                 ) {
                   break;
                 }
+                firstPageIds = (response.data.check_runs ?? []).map(
+                  (check) => check.id,
+                );
               }
-              checkRuns.push(...(response.data.check_runs ?? []));
-              if (checkRuns.length >= totalCount) {
-                historyComplete = true;
+              for (const check of response.data.check_runs ?? []) {
+                checkRunsById.set(check.id, check);
+              }
+              if (checkRunsById.size >= totalCount) {
                 break;
               }
+            }
+            if (checkRunsById.size === totalCount) {
+              const verification = await github.rest.checks.listForRef({
+                owner,
+                repo,
+                ref: headSha,
+                app_id: 1451866,
+                filter: "all",
+                per_page: 100,
+                page: 1,
+              });
+              const verificationTotalCount = verification.data.total_count;
+              const verificationFirstPageIds = (
+                verification.data.check_runs ?? []
+              ).map((check) => check.id);
+              historyComplete =
+                Number.isSafeInteger(verificationTotalCount) &&
+                verificationTotalCount === totalCount &&
+                verificationTotalCount <= 500 &&
+                verificationFirstPageIds.length === firstPageIds.length &&
+                verificationFirstPageIds.every(
+                  (id, index) => id === firstPageIds[index],
+                );
             }
             if (!historyComplete) {
               if (attempt === 0) {
@@ -96,6 +124,7 @@ pre-agent-steps:
               }
               continue;
             }
+            const checkRuns = [...checkRunsById.values()];
             const trustedCandidates = checkRuns.filter((check) =>
               check?.app?.slug === "wingetvalidator-prod" &&
               check.head_sha === headSha &&
