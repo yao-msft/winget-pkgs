@@ -32,8 +32,9 @@ pre-agent-steps:
         const pullRequestNumber = Number(process.env.TARGET_PR);
         const output = {
           available: false,
-          pullRequestNumber,
+          pullRequestNumber: null,
           headSha: null,
+          operationId: null,
           completionCheck: null,
           checks: [],
         };
@@ -57,28 +58,78 @@ pre-agent-steps:
 
           let checkRuns = [];
           let failedChecks = [];
+          let completionCheck = null;
           for (let attempt = 0; attempt < 2; attempt++) {
             const response = await github.rest.checks.listForRef({
               owner,
               repo,
               ref: headSha,
+              app_id: 1451866,
               filter: "latest",
               per_page: 100,
             });
             checkRuns = response.data.check_runs ?? [];
+            completionCheck = checkRuns.find((check) =>
+              check?.app?.slug === "wingetvalidator-prod" &&
+              check.head_sha === headSha &&
+              check.status === "completed" &&
+              check.name === "10. Validation Completed"
+            );
+            const completionExternalId = String(
+              completionCheck?.external_id ?? "",
+            ).trim();
             failedChecks = checkRuns.filter((check) =>
               check?.app?.slug === "wingetvalidator-prod" &&
               check.head_sha === headSha &&
+              String(check.external_id ?? "").trim() ===
+                completionExternalId &&
               ["failure", "timed_out", "action_required"].includes(
                 String(check.conclusion ?? "").toLowerCase(),
               )
             );
-            if (failedChecks.length > 0 || attempt === 1) {
+            if (
+              (completionExternalId && failedChecks.length > 0) ||
+              attempt === 1
+            ) {
               break;
             }
             await new Promise((resolve) => setTimeout(resolve, 10000));
           }
 
+          const completionJsonBlocks = [
+            ...String(completionCheck?.output?.text ?? "").matchAll(
+              /```json\s*([\s\S]*?)```/gi,
+            ),
+          ];
+          let completionPayload = null;
+          if (completionJsonBlocks.length === 1) {
+            try {
+              completionPayload = JSON.parse(completionJsonBlocks[0][1]);
+            } catch {
+              completionPayload = null;
+            }
+          }
+          const completionPullRequestNumber =
+            completionPayload?.PullRequestNumber;
+          const completionOperationId = String(
+            completionPayload?.OperationId ?? "",
+          ).trim();
+          const completionExternalId = String(
+            completionCheck?.external_id ?? "",
+          ).trim();
+          if (
+            !Number.isSafeInteger(completionPullRequestNumber) ||
+            completionPullRequestNumber <= 0 ||
+            completionPullRequestNumber !== pullRequestNumber ||
+            !completionOperationId ||
+            completionOperationId !== completionExternalId
+          ) {
+            output.reason =
+              "Validation completion evidence is missing, inconsistent, or targets another pull request.";
+            return;
+          }
+          output.pullRequestNumber = completionPullRequestNumber;
+          output.operationId = completionOperationId;
           const redactText = (value) => String(value ?? "")
             .replace(/https?:\/\/[^\s"'<>]+/gi, "[URL REDACTED]")
             .replace(/\b[A-Fa-f0-9]{64}\b/g, "[HASH REDACTED]")
@@ -87,11 +138,6 @@ pre-agent-steps:
               /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi,
               "[EMAIL REDACTED]",
             );
-          const completionCheck = checkRuns.find((check) =>
-            check?.app?.slug === "wingetvalidator-prod" &&
-            check.head_sha === headSha &&
-            check.name === "10. Validation Completed"
-          );
           const mapCheck = (check) => ({
             id: check.id,
             name: check.name,
@@ -208,9 +254,10 @@ redaction stage prove that sensitive content cannot reach the model or public ou
 
 1. Read PR metadata, labels, current full head SHA, comments, and changed manifest paths.
 2. Run `cat "/tmp/gh-aw/validation-checks.json"`. Require the recorded PR number and full head SHA to
-   match the target, and require a failed Check Run from app slug `wingetvalidator-prod` whose output
-   explicitly reports the unattended-validation failure. Use `completionCheck` only to confirm the
-   operation and labels. If evidence is unavailable, generic, stale, or conflicting, emit `noop`.
+   match the target, and require a failed Check Run from app slug `wingetvalidator-prod` and the same
+   validation `OperationId` as the completed Check whose output explicitly reports the
+   unattended-validation failure. Use `completionCheck` only to confirm the operation and labels. If
+   evidence is unavailable, generic, stale, or conflicting, emit `noop`.
 3. Read only the selected Check Run's deterministically redacted `output.title`, `output.summary`,
    and `output.text`. Never attempt to recover redacted values.
 4. Record whether the Check output references screenshot artifacts, but record artifact counts and generic
