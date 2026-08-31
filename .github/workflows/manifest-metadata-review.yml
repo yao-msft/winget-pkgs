@@ -13,7 +13,7 @@ permissions:
 
 concurrency:
   group: manifest-metadata-elevation-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   remind:
@@ -105,7 +105,8 @@ jobs:
               `###### ${elevationMarker}`
             ].join('\n');
 
-            const [{ data: pull }, comments, reviews] = await Promise.all([
+            const [{ data: pull }, comments, reviews, reviewComments] =
+              await Promise.all([
               github.rest.pulls.get({
                 owner,
                 repo,
@@ -118,6 +119,12 @@ jobs:
                 per_page: 100
               }),
               github.paginate(github.rest.pulls.listReviews, {
+                owner,
+                repo,
+                pull_number: pullNumber,
+                per_page: 100
+              }),
+              github.paginate(github.rest.pulls.listReviewComments, {
                 owner,
                 repo,
                 pull_number: pullNumber,
@@ -167,7 +174,8 @@ jobs:
             }
             if (
               comments.some(isIndependentHuman) ||
-              reviews.some(isIndependentHuman)
+              reviews.some(isIndependentHuman) ||
+              reviewComments.some(isIndependentHuman)
             ) {
               core.info('Skipped: independent human feedback already exists.');
               return;
