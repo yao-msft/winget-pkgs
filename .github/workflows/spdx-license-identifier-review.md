@@ -10,13 +10,13 @@ on:
       pull_request_number:
         description: Pull request number to review
         required: true
-        type: string
+        type: number
   roles: [admin, maintainer, write]
 checkout: false
 concurrency:
   group: >-
     gh-aw-${{ github.workflow }}-${{
-    github.event.inputs.pull_request_number || github.run_id }}
+    inputs.pull_request_number || github.run_id }}
   cancel-in-progress: false
   queue: max
 engine: copilot
@@ -48,14 +48,14 @@ safe-outputs:
   add-comment:
     issues: false
     max: 1
-    target: ${{ github.event.inputs.pull_request_number }}
+    target: ${{ inputs.pull_request_number }}
 ---
 
 # SPDX License Identifier Review
 
 ## Task
 
-Review pull request `${{ github.event.inputs.pull_request_number }}` in
+Review pull request `${{ inputs.pull_request_number }}` in
 `microsoft/winget-pkgs`. Recommend replacing one changed `License` value with
 one canonical SPDX identifier only when the evidence rules below prove an exact
 and unambiguous match. Otherwise emit `noop`.
