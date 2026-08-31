@@ -121,7 +121,55 @@ pre-agent-steps:
                   check.head_sha === headSha,
               );
             }
-            if (checkRuns.length > 0 || attempt === 1) {
+            const readyCompletionChecks = checkRuns.filter(
+              (check) =>
+                check.name === "10. Validation Completed" &&
+                check.status === "completed" &&
+                String(check.external_id ?? "").trim(),
+            );
+            const readyOperationId =
+              readyCompletionChecks.length === 1
+                ? String(readyCompletionChecks[0].external_id).trim()
+                : "";
+            let readyCompletionPayload = null;
+            const readyCompletionText = String(
+              readyCompletionChecks[0]?.output?.text ?? "",
+            );
+            if (Buffer.byteLength(readyCompletionText, "utf8") <= 12000) {
+              const readyJsonBlocks = [
+                ...readyCompletionText.matchAll(
+                  /```json\s*([\s\S]*?)```/gi,
+                ),
+              ];
+              if (readyJsonBlocks.length === 1) {
+                try {
+                  readyCompletionPayload = JSON.parse(readyJsonBlocks[0][1]);
+                } catch {
+                  readyCompletionPayload = null;
+                }
+              }
+            }
+            const hasReadyCompletion =
+              readyCompletionPayload?.PullRequestNumber === pullRequestNumber &&
+              String(readyCompletionPayload?.OperationId ?? "").trim() ===
+                readyOperationId;
+            const hasReadyFailure = checkRuns.some(
+              (check) =>
+                check.id !== readyCompletionChecks[0]?.id &&
+                check.status === "completed" &&
+                String(check.external_id ?? "").trim() === readyOperationId &&
+                ["failure", "timed_out", "action_required"].includes(
+                  String(check.conclusion ?? "").toLowerCase(),
+                ),
+            );
+            if (
+              (
+                readyCompletionChecks.length === 1 &&
+                hasReadyCompletion &&
+                hasReadyFailure
+              ) ||
+              attempt === 1
+            ) {
               break;
             }
             await new Promise((resolve) => setTimeout(resolve, 10000));
