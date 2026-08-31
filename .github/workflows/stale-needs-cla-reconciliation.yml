@@ -28,7 +28,8 @@ jobs:
             const labelName = "Needs-CLA";
             const checkName = "license/cla";
             const policyAppId = 95686;
-            const searchLimit = 100;
+            const searchPageSize = 100;
+            const candidateBudget = 250;
             const detailLimit = 75;
             const requestConcurrency = 6;
             const { owner, repo } = context.repo;
@@ -66,6 +67,8 @@ jobs:
                 pull?.number !== expectedNumber ||
                 !Number.isSafeInteger(pull.user?.id) ||
                 typeof pull.user?.login !== "string" ||
+                typeof pull.state !== "string" ||
+                !Array.isArray(pull.labels) ||
                 !/^[0-9a-f]{40}$/.test(pull.head?.sha ?? "") ||
                 typeof pull.base?.ref !== "string" ||
                 typeof pull.base?.repo?.full_name !== "string"
@@ -185,11 +188,62 @@ jobs:
                   delete record.checkId;
                 }
               } catch (error) {
-                record.kind = "skipped";
+                record.kind = "unresolved";
                 record.detail = `final pull read failed: ${errorText(error)}`;
                 delete record.checkId;
               }
               return record;
+            }
+            async function enumerateCandidates(defaultBranch) {
+              const numbers = [];
+              let expectedTotal;
+              let pageCount = 1;
+              for (let page = 1; page <= pageCount; page++) {
+                const search = await github.request("GET /search/issues", {
+                  q:
+                    `repo:${owner}/${repo} is:pr is:open base:"${defaultBranch}" ` +
+                    `label:"${labelName}"`,
+                  per_page: searchPageSize,
+                  page,
+                  sort: "created",
+                  order: "asc",
+                });
+                const items = search.data?.items;
+                const total = search.data?.total_count;
+                if (
+                  search.data?.incomplete_results !== false ||
+                  !Array.isArray(items) ||
+                  !Number.isSafeInteger(total) ||
+                  total < 0 ||
+                  total > candidateBudget
+                ) {
+                  throw new Error(
+                    `Needs-CLA Search exceeded the complete ${candidateBudget}-PR budget`,
+                  );
+                }
+                if (expectedTotal !== undefined && total !== expectedTotal) {
+                  throw new Error("Needs-CLA Search count changed during enumeration");
+                }
+                expectedTotal = total;
+                pageCount = Math.ceil(total / searchPageSize);
+                for (const item of items) {
+                  if (
+                    !Number.isSafeInteger(item?.number) ||
+                    item.number < 1 ||
+                    !item.pull_request
+                  ) {
+                    throw new Error("Search returned a non-pull-request item");
+                  }
+                  numbers.push(item.number);
+                }
+              }
+              if (
+                numbers.length !== expectedTotal ||
+                new Set(numbers).size !== numbers.length
+              ) {
+                throw new Error("Needs-CLA Search enumeration was incomplete");
+              }
+              return numbers;
             }
             const repository = await github.request(
               "GET /repos/{owner}/{repo}", { owner, repo });
@@ -198,36 +252,13 @@ jobs:
               throw new Error("Repository default branch was unavailable");
             }
 
-            // Discovery is deliberately one Search request; excess matches are
-            // counted rather than silently paginated or partially inferred.
-            const search = await github.request("GET /search/issues", {
-              q: `repo:${owner}/${repo} is:pr is:open label:"${labelName}"`,
-              per_page: searchLimit,
-              page: 1,
-            });
-            const items = search.data?.items;
-            const searchTotal = search.data?.total_count;
+            const numbers = await enumerateCandidates(defaultBranch);
+            const confirmation = await enumerateCandidates(defaultBranch);
             if (
-              search.data?.incomplete_results !== false ||
-              !Array.isArray(items) ||
-              !Number.isSafeInteger(searchTotal) ||
-              searchTotal < items.length
+              numbers.length !== confirmation.length ||
+              numbers.some((number, index) => number !== confirmation[index])
             ) {
-              throw new Error("Needs-CLA Search response was incomplete");
-            }
-
-            const numbers = items.map((item) => {
-              if (
-                !Number.isSafeInteger(item?.number) ||
-                item.number < 1 ||
-                !item.pull_request
-              ) {
-                throw new Error("Search returned a non-pull-request item");
-              }
-              return item.number;
-            });
-            if (new Set(numbers).size !== numbers.length) {
-              throw new Error("Search returned duplicate pull requests");
+              throw new Error("Needs-CLA candidate set changed during enumeration");
             }
             const records = await mapBounded(
               numbers,
@@ -242,7 +273,6 @@ jobs:
             for (const record of records) {
               counts[record.kind]++;
             }
-            const searchOmitted = searchTotal - numbers.length;
             const displayed = records.slice(0, detailLimit);
             const detailOmitted = records.length - displayed.length;
             const lines = [
@@ -251,9 +281,7 @@ jobs:
               "Read-only results. Every PR below was evaluated independently against",
               `app ID \`${policyAppId}\`, check \`${checkName}\`, and its exact current head.`,
               "",
-              `- Search matches: **${searchTotal}**`,
-              `- Audited from the bounded Search pass: **${records.length}**`,
-              `- Search matches omitted by the ${searchLimit}-PR cap: **${searchOmitted}**`,
+              `- Search matches audited: **${records.length}**`,
               `- Authoritative completed/success candidates: **${counts.candidate}**`,
               `- Unresolved: **${counts.unresolved}**`,
               `- Changed or ineligible PRs skipped: **${counts.skipped}**`,
@@ -290,7 +318,7 @@ jobs:
             }
 
             core.info(
-              `Audited ${records.length}/${searchTotal} Search matches; ` +
+              `Audited all ${records.length} Search matches; ` +
                 `${counts.candidate} candidates, ${counts.unresolved} unresolved, ` +
                 `${counts.skipped} skipped.`,
             );
