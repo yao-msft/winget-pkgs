@@ -1,0 +1,297 @@
+name: Stale Needs-CLA Reconciliation
+
+on:
+  schedule:
+    - cron: "17 12 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: stale-needs-cla-reconciliation
+  cancel-in-progress: true
+
+permissions:
+  checks: read
+  contents: read
+  pull-requests: read
+
+jobs:
+  audit:
+    name: Audit stale Needs-CLA labels
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Report authoritative CLA reconciliation candidates
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const labelName = "Needs-CLA";
+            const checkName = "license/cla";
+            const policyAppId = 95686;
+            const searchLimit = 100;
+            const detailLimit = 75;
+            const requestConcurrency = 6;
+            const { owner, repo } = context.repo;
+            const escapeMarkdown = (value) =>
+              String(value)
+                .replace(/[\r\n]+/g, " ").replace(/\\/g, "\\\\")
+                .replace(/([`*_[\]{}()<>#+\-.!|])/g, "\\$1");
+
+            const errorText = (error) => {
+              const message =
+                error instanceof Error ? error.message : "Unknown request failure";
+              return message.replace(/[\r\n]+/g, " ").slice(0, 160);
+            };
+            async function mapBounded(values, concurrency, mapper) {
+              const results = new Array(values.length);
+              let next = 0;
+              async function worker() {
+                while (next < values.length) {
+                  const index = next++;
+                  results[index] = await mapper(values[index]);
+                }
+              }
+              await Promise.all(
+                Array.from({ length: Math.min(concurrency, values.length) },
+                  () => worker()),
+              );
+              return results;
+            }
+            function hasLabel(pull) {
+              return Array.isArray(pull.labels) &&
+                pull.labels.some((label) => label?.name === labelName);
+            }
+            function snapshot(pull, expectedNumber) {
+              if (
+                pull?.number !== expectedNumber ||
+                !Number.isSafeInteger(pull.user?.id) ||
+                typeof pull.user?.login !== "string" ||
+                !/^[0-9a-f]{40}$/.test(pull.head?.sha ?? "") ||
+                typeof pull.base?.ref !== "string" ||
+                typeof pull.base?.repo?.full_name !== "string"
+              ) {
+                throw new Error("Pull request response was incomplete or inconsistent");
+              }
+              return {
+                number: expectedNumber,
+                state: pull.state,
+                hasNeedsCla: hasLabel(pull),
+                headSha: pull.head.sha,
+                baseRef: pull.base.ref,
+                baseRepo: pull.base.repo.full_name,
+                authorId: pull.user.id,
+                login: pull.user.login,
+              };
+            }
+            async function getPull(number) {
+              const response = await github.request(
+                "GET /repos/{owner}/{repo}/pulls/{pull_number}",
+                { owner, repo, pull_number: number });
+              return snapshot(response.data, number);
+            }
+            function eligible(pull, defaultBranch) {
+              return (
+                pull.state === "open" &&
+                pull.hasNeedsCla &&
+                pull.baseRef === defaultBranch &&
+                pull.baseRepo.toLowerCase() ===
+                  `${owner}/${repo}`.toLowerCase()
+              );
+            }
+            async function auditPull(number, defaultBranch) {
+              let initial;
+              try {
+                initial = await getPull(number);
+              } catch (error) {
+                return {
+                  number,
+                  kind: "unresolved",
+                  detail: `initial pull read failed: ${errorText(error)}`,
+                };
+              }
+              const record = {
+                number,
+                authorId: initial.authorId,
+                login: initial.login,
+                headSha: initial.headSha,
+              };
+              if (!eligible(initial, defaultBranch)) {
+                return {
+                  ...record,
+                  kind: "skipped",
+                  detail: "not currently open on the default base with Needs-CLA",
+                };
+              }
+              try {
+                const response = await github.request(
+                  "GET /repos/{owner}/{repo}/commits/{ref}/check-runs",
+                  {
+                    owner,
+                    repo,
+                    ref: initial.headSha,
+                    app_id: policyAppId,
+                    check_name: checkName,
+                    filter: "latest",
+                    per_page: 100,
+                    page: 1,
+                  },
+                );
+                const runs = response.data?.check_runs;
+                const total = response.data?.total_count;
+                if (!Array.isArray(runs) || !Number.isSafeInteger(total)) {
+                  throw new Error("Check-runs response was incomplete");
+                }
+                const exact = runs.every(
+                  (run) =>
+                    run?.app?.id === policyAppId &&
+                    run.name === checkName &&
+                    run.head_sha === initial.headSha,
+                );
+                if (!exact) {
+                  record.kind = "unresolved";
+                  record.detail =
+                    "Checks API returned a non-exact app, name, or head SHA";
+                } else if (total !== runs.length || runs.length !== 1) {
+                  record.kind = "unresolved";
+                  record.detail =
+                    `server-selected latest checks not singular (${runs.length}/${total})`;
+                } else {
+                  const run = runs[0];
+                  record.checkId = run.id;
+                  if (run.status === "completed" && run.conclusion === "success") {
+                    record.kind = "candidate";
+                    record.detail = "completed/success";
+                  } else {
+                    record.kind = "unresolved";
+                    record.detail =
+                      `${run.status ?? "unknown"}/${run.conclusion ?? "none"}`;
+                  }
+                }
+              } catch (error) {
+                record.kind = "unresolved";
+                record.detail = `check read failed: ${errorText(error)}`;
+              }
+
+              try {
+                const final = await getPull(number);
+                record.login = final.login;
+                if (
+                  !eligible(final, defaultBranch) ||
+                  final.headSha !== initial.headSha ||
+                  final.authorId !== initial.authorId
+                ) {
+                  record.kind = "skipped";
+                  record.detail = "pull request state changed during this audit";
+                  delete record.checkId;
+                }
+              } catch (error) {
+                record.kind = "skipped";
+                record.detail = `final pull read failed: ${errorText(error)}`;
+                delete record.checkId;
+              }
+              return record;
+            }
+            const repository = await github.request(
+              "GET /repos/{owner}/{repo}", { owner, repo });
+            const defaultBranch = repository.data?.default_branch;
+            if (typeof defaultBranch !== "string" || !defaultBranch) {
+              throw new Error("Repository default branch was unavailable");
+            }
+
+            // Discovery is deliberately one Search request; excess matches are
+            // counted rather than silently paginated or partially inferred.
+            const search = await github.request("GET /search/issues", {
+              q: `repo:${owner}/${repo} is:pr is:open label:"${labelName}"`,
+              per_page: searchLimit,
+              page: 1,
+            });
+            const items = search.data?.items;
+            const searchTotal = search.data?.total_count;
+            if (
+              search.data?.incomplete_results !== false ||
+              !Array.isArray(items) ||
+              !Number.isSafeInteger(searchTotal) ||
+              searchTotal < items.length
+            ) {
+              throw new Error("Needs-CLA Search response was incomplete");
+            }
+
+            const numbers = items.map((item) => {
+              if (
+                !Number.isSafeInteger(item?.number) ||
+                item.number < 1 ||
+                !item.pull_request
+              ) {
+                throw new Error("Search returned a non-pull-request item");
+              }
+              return item.number;
+            });
+            if (new Set(numbers).size !== numbers.length) {
+              throw new Error("Search returned duplicate pull requests");
+            }
+            const records = await mapBounded(
+              numbers,
+              requestConcurrency,
+              (number) => auditPull(number, defaultBranch));
+            records.sort(
+              (left, right) =>
+                (left.authorId ?? Number.MAX_SAFE_INTEGER) -
+                  (right.authorId ?? Number.MAX_SAFE_INTEGER) ||
+                left.number - right.number);
+            const counts = { candidate: 0, unresolved: 0, skipped: 0 };
+            for (const record of records) {
+              counts[record.kind]++;
+            }
+            const searchOmitted = searchTotal - numbers.length;
+            const displayed = records.slice(0, detailLimit);
+            const detailOmitted = records.length - displayed.length;
+            const lines = [
+              "# Stale Needs-CLA reconciliation audit",
+              "",
+              "Read-only results. Every PR below was evaluated independently against",
+              `app ID \`${policyAppId}\`, check \`${checkName}\`, and its exact current head.`,
+              "",
+              `- Search matches: **${searchTotal}**`,
+              `- Audited from the bounded Search pass: **${records.length}**`,
+              `- Search matches omitted by the ${searchLimit}-PR cap: **${searchOmitted}**`,
+              `- Authoritative completed/success candidates: **${counts.candidate}**`,
+              `- Unresolved: **${counts.unresolved}**`,
+              `- Changed or ineligible PRs skipped: **${counts.skipped}**`,
+              `- Detail rows omitted by the ${detailLimit}-row summary cap: **${detailOmitted}**`,
+              "",
+            ];
+            let priorAuthor;
+            for (const record of displayed) {
+              const authorKey =
+                record.authorId === undefined
+                  ? `unknown-${record.number}`
+                  : String(record.authorId);
+              if (authorKey !== priorAuthor) {
+                const author =
+                  record.authorId === undefined
+                    ? "Author unavailable"
+                    : `@${escapeMarkdown(record.login)} (ID \`${record.authorId}\`)`;
+                lines.push(`### ${author}`, "");
+                priorAuthor = authorKey;
+              }
+              const head = record.headSha
+                ? ` \`${record.headSha.slice(0, 12)}\``
+                : "";
+              const check = record.checkId
+                ? `; check run \`${record.checkId}\``
+                : "";
+              lines.push(
+                `- #${record.number}${head}: **${record.kind}** - ` +
+                  `${escapeMarkdown(record.detail)}${check}`,
+              );
+            }
+            if (displayed.length === 0) {
+              lines.push("No PR details to display.");
+            }
+
+            core.info(
+              `Audited ${records.length}/${searchTotal} Search matches; ` +
+                `${counts.candidate} candidates, ${counts.unresolved} unresolved, ` +
+                `${counts.skipped} skipped.`,
+            );
+            await core.summary.addRaw(lines.join("\n")).write();
