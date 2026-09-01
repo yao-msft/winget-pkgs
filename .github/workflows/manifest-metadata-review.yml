@@ -121,7 +121,10 @@ jobs:
               return;
             }
 
-            const values = new Set();
+            const addedValues = new Map();
+            const deletedValues = new Map();
+            const recordValue = (map, value) =>
+              map.set(value, (map.get(value) || 0) + 1);
             for (const file of files) {
               const isInstallerManifest =
                 /^manifests\/.+\.installer\.ya?ml$/i.test(file.filename);
@@ -148,18 +151,24 @@ jobs:
               }
               for (const line of patchLines) {
                 const match = line.match(
-                  /^\+\s*ElevationRequirement:\s*([A-Za-z]+)\s*(?:#.*)?$/
+                  /^([+-])\s*ElevationRequirement:\s*([A-Za-z]+)\s*(?:#.*)?$/
                 );
-                if (match && supportedValues.has(match[1])) {
-                  values.add(match[1]);
+                if (match && supportedValues.has(match[2])) {
+                  recordValue(
+                    match[1] === '+' ? addedValues : deletedValues,
+                    match[2]
+                  );
                 }
               }
             }
-            if (values.size !== 1) {
+            const values = [...addedValues].filter(
+              ([value, count]) => count > (deletedValues.get(value) || 0)
+            );
+            if (values.length !== 1) {
               core.info('Skipped: no unique supported ElevationRequirement change was found.');
               return;
             }
-            const [elevationValue] = values;
+            const [[elevationValue]] = values;
 
             const [comments, reviews, reviewComments] = await Promise.all([
                 github.paginate(github.rest.issues.listComments, {
