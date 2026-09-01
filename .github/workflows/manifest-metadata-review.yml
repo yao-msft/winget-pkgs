@@ -2,7 +2,7 @@ name: Manifest Metadata Elevation Reminder
 
 on:
   pull_request_target:
-    branches: [master]
+    branches: [e2e/final-five-workflows]
     types: [opened, reopened, synchronize]
 
 # Fork pull requests are safe here because no pull request content is checked out
@@ -19,7 +19,7 @@ concurrency:
 jobs:
   remind:
     if: >-
-      github.repository == 'microsoft/winget-pkgs' &&
+      github.repository == 'yao-msft/winget-pkgs' &&
       github.event.pull_request.user.login != 'wingetbot'
     runs-on: ubuntu-latest
     timeout-minutes: 5
