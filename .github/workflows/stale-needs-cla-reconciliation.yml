@@ -58,6 +58,14 @@ jobs:
               );
               return results;
             }
+            let checkRevalidationTail = Promise.resolve();
+            async function paceCheckRevalidation() {
+              const turn = checkRevalidationTail.then(
+                () => new Promise((resolve) => setTimeout(resolve, 350)),
+              );
+              checkRevalidationTail = turn.catch(() => {});
+              await turn;
+            }
             function hasLabel(pull) {
               return Array.isArray(pull.labels) &&
                 pull.labels.some((label) => label?.name === labelName);
@@ -179,6 +187,53 @@ jobs:
               } catch (error) {
                 record.kind = "unresolved";
                 record.detail = `check read failed: ${errorText(error)}`;
+              }
+
+              if (record.kind === "candidate") {
+                try {
+                  await paceCheckRevalidation();
+                  const response = await github.request(
+                    "GET /repos/{owner}/{repo}/commits/{ref}/check-runs",
+                    {
+                      owner,
+                      repo,
+                      ref: initial.headSha,
+                      app_id: policyAppId,
+                      check_name: checkName,
+                      filter: "latest",
+                      per_page: 100,
+                      page: 1,
+                    },
+                  );
+                  const runs = response.data?.check_runs;
+                  const total = response.data?.total_count;
+                  const exact =
+                    Array.isArray(runs) &&
+                    runs.every(
+                      (run) =>
+                        run?.app?.id === policyAppId &&
+                        run.name === checkName &&
+                        run.head_sha === initial.headSha,
+                    );
+                  if (
+                    !exact ||
+                    !Number.isSafeInteger(total) ||
+                    total !== 1 ||
+                    runs.length !== 1 ||
+                    runs[0].id !== record.checkId ||
+                    runs[0].status !== "completed" ||
+                    runs[0].conclusion !== "success"
+                  ) {
+                    record.kind = "unresolved";
+                    record.detail = "CLA Check changed during this audit";
+                    delete record.checkId;
+                  }
+                } catch (error) {
+                  record.kind = "unresolved";
+                  record.detail =
+                    `final check read failed: ${errorText(error)}`;
+                  delete record.checkId;
+                }
               }
 
               try {
