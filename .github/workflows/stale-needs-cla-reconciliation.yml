@@ -160,8 +160,14 @@ jobs:
                     `server-selected latest checks not singular (${runs.length}/${total})`;
                 } else {
                   const run = runs[0];
-                  record.checkId = run.id;
-                  if (run.status === "completed" && run.conclusion === "success") {
+                  if (!Number.isSafeInteger(run.id) || run.id < 1) {
+                    record.kind = "unresolved";
+                    record.detail = "Check run ID was missing or invalid";
+                  } else if (
+                    run.status === "completed" &&
+                    run.conclusion === "success"
+                  ) {
+                    record.checkId = run.id;
                     record.kind = "candidate";
                     record.detail = "completed/success";
                   } else {
