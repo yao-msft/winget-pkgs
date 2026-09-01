@@ -3,7 +3,7 @@
 PackageIdentifier: E2E.MetadataFixture
 PackageVersion: 1.0.0
 InstallerType: exe
-ElevationRequirement: elevatesSelf
+ElevationRequirement: elevationRequired
 Installers:
   - Architecture: x64
     InstallerUrl: https://example.invalid/fixture.exe
