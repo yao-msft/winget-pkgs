@@ -135,13 +135,16 @@ All of these conditions are required:
    governing the submitted version, not a summary, badge, generated
    classification, third-party notice, dependency license, or copied
    package-manager metadata.
-4. Fetch the candidate identifier's canonical record from
-   `https://spdx.org/licenses/`. The identifier must match case exactly, be
-   current, and not be deprecated.
-5. The publisher file's complete license text must equal that one SPDX
-   canonical license text. Permit only CRLF-versus-LF normalization and one
-   trailing newline. Do not ignore copyright lines, notices, punctuation,
-   changed words, added terms, removed terms, exceptions, or headers.
+4. Fetch the candidate identifier's machine-readable canonical record only
+   from `https://spdx.org/licenses/<SPDX-ID>.json`. Require its
+   `licenseId` to match case exactly and `isDeprecatedLicenseId` to be `false`.
+   Use the JSON `licenseText` string as the canonical text; do not compare
+   rendered HTML, browser text, summaries, or line-wrapped display output.
+5. The publisher file's complete license text must equal that JSON
+   `licenseText` value. Permit only CRLF-versus-LF normalization and one
+   trailing newline. Do not otherwise reflow lines or ignore copyright lines,
+   notices, punctuation, changed words, added terms, removed terms,
+   exceptions, or headers.
 6. No other publisher file or statement for that exact version introduces a
    second license, an exception, a choice, custom terms, or a conflict.
 
