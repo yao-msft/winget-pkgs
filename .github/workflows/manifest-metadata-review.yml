@@ -90,6 +90,17 @@ jobs:
             const initialLabels = (initialPull.labels || []).map((label) =>
               String(label.name || '')
             );
+            core.info(JSON.stringify({
+              state: initialPull.state,
+              headMatches: initialPull.head.sha === eventHead,
+              baseMatches: initialPull.base.sha === eventBase,
+              baseRef: initialPull.base.ref,
+              baseRepository: initialPull.base.repo?.full_name?.toLowerCase(),
+              contextRepository: `${owner}/${repo}`,
+              author: initialPull.user?.login,
+              changedFiles: initialPull.changed_files,
+              hardAbort: initialLabels.some((label) => hardAbortLabels.has(label))
+            }));
             if (
               initialPull.state !== 'open' ||
               initialPull.head.sha !== eventHead ||
