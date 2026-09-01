@@ -46,6 +46,14 @@ jobs:
             function message(error) {
               return String(error?.message ?? error).replace(/[\r\n]+/g, " ").slice(0, 300);
             }
+            function escapeHtml(value) {
+              return String(value)
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#39;");
+            }
             function recordSkip(number, reason) {
               counts.skipped++;
               skipped.push(`#${number}: ${reason}`);
@@ -261,14 +269,20 @@ jobs:
                   ["Enumerated", "Audited", "Newer", "No newer", "Skipped", "Errors"],
                   Object.values(counts).map(String),
                 ]);
-              if (hardFailure) summary.addHeading("Enumeration failure", 2).addRaw(hardFailure);
+              if (hardFailure) {
+                summary.addHeading("Enumeration failure", 2)
+                  .addRaw(escapeHtml(hardFailure));
+              }
               summary.addHeading("Newer versions found", 2).addTable([
                 ["Pull request", "Package path", "Removed version", "Newest version"],
-                ...(newer.length ? newer : [["None", "", "", ""]]),
+                ...(newer.length
+                  ? newer.map((row) => row.map(escapeHtml))
+                  : [["None", "", "", ""]]),
               ]);
-              summary.addHeading("Skipped", 2).addList(skipped.length ? skipped : ["None"]);
+              summary.addHeading("Skipped", 2)
+                .addList(skipped.length ? skipped.map(escapeHtml) : ["None"]);
               summary.addHeading("Per-candidate errors", 2)
-                .addList(errors.length ? errors : ["None"]);
+                .addList(errors.length ? errors.map(escapeHtml) : ["None"]);
               await summary.write();
               if (counts.errors > 0) {
                 core.setFailed(
