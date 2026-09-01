@@ -20,6 +20,7 @@ concurrency:
   cancel-in-progress: false
   queue: max
 engine: copilot
+model: gpt-5.4
 permissions:
   contents: read
   issues: read
