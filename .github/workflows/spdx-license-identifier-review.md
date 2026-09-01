@@ -127,6 +127,10 @@ All of these conditions are required:
    be the commit resolved by a publisher tag named exactly `PackageVersion` or
    `v<PackageVersion>`. If ownership or tag resolution is uncertain, emit
    `noop`.
+   Check both exact candidate tag names before concluding that no tag exists:
+   first `PackageVersion`, then `v<PackageVersion>`. Absence of the first tag
+   alone is not a reason to stop. If both tags exist but resolve to different
+   commits, treat the evidence as ambiguous and emit `noop`.
 3. Fetch only that text file at that commit. It must be the complete license
    governing the submitted version, not a summary, badge, generated
    classification, third-party notice, dependency license, or copied
