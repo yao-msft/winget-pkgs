@@ -51,8 +51,26 @@ pre-agent-steps:
           pullRequestNumber: null,
           headSha: null,
           operationId: null,
+          completionCheckId: null,
           checks: [],
         };
+        const hardAbortLabels = new Set([
+          "Package-Flagged",
+          "Error-Hash-Mismatch",
+          "Needs-SmartScreen-Investigation",
+          "PUA-Detection",
+          "URL-Validation-Error",
+          "Validation-Defender-Error",
+          "Validation-Domain",
+          "Validation-Hash-Flagged",
+          "Validation-Hash-Verification-Failed",
+          "Validation-Indirect-URL",
+          "Validation-SmartScreen",
+          "Validation-SmartScreen-Error",
+          "Validation-Unapproved-URL",
+          "Validation-Virus-Scan-Error",
+          "Waived-Validation-Defender-Error",
+        ]);
         const writeOutput = () =>
           fs.writeFileSync(outputPath, JSON.stringify(output));
         const fail = (reason) => {
@@ -89,9 +107,13 @@ pre-agent-steps:
             pull.base?.repo?.full_name !== `${owner}/${repo}` ||
             !/^[0-9a-f]{40}$/.test(headSha) ||
             !triggerHeadSha ||
-            triggerHeadSha !== headSha
+            triggerHeadSha !== headSha ||
+            !Array.isArray(pull.labels) ||
+            pull.labels.some((label) =>
+              hardAbortLabels.has(String(label?.name ?? "")),
+            )
           ) {
-            fail("The pull request identity, state, or head SHA is not current.");
+            fail("The pull request identity, state, head SHA, or safety state is not current.");
             return;
           }
 
@@ -229,9 +251,22 @@ pre-agent-steps:
             fail("A bounded set of failed checks for the operation was not found.");
             return;
           }
+          if (
+            !Number.isSafeInteger(completionCheck.id) ||
+            completionCheck.id < 1 ||
+            failedChecks.some(
+              (check) => !Number.isSafeInteger(check.id) || check.id < 1,
+            ) ||
+            new Set(failedChecks.map((check) => check.id)).size !==
+              failedChecks.length
+          ) {
+            fail("Validation Check identities were incomplete or duplicated.");
+            return;
+          }
 
           output.pullRequestNumber = pullRequestNumber;
           output.operationId = operationId;
+          output.completionCheckId = completionCheck.id;
           output.checks = failedChecks.map((check) => ({
             id: check.id,
             name: bounded(check.name, 256),
@@ -247,6 +282,213 @@ pre-agent-steps:
           fail("Authoritative validation evidence could not be collected safely.");
         } finally {
           writeOutput();
+        }
+post-steps:
+  - name: Revalidate authoritative validation operation
+    if: always()
+    uses: actions/github-script@v9
+    env:
+      TARGET_PR: ${{ github.event.pull_request.number || '' }}
+      TRIGGER_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+    with:
+      github-token: "${{ github.token }}"
+      script: |
+        const fs = require("fs");
+        const agentOutputPath = "/tmp/gh-aw/agent_output.json";
+        const evidencePath = "/tmp/gh-aw/validation-checks.json";
+        const owner = "microsoft";
+        const repo = "winget-pkgs";
+        const pullRequestNumber = Number(process.env.TARGET_PR);
+        const triggerHeadSha = String(process.env.TRIGGER_HEAD_SHA ?? "").trim();
+        const hardAbortLabels = new Set([
+          "Package-Flagged",
+          "Error-Hash-Mismatch",
+          "Needs-SmartScreen-Investigation",
+          "PUA-Detection",
+          "URL-Validation-Error",
+          "Validation-Defender-Error",
+          "Validation-Domain",
+          "Validation-Hash-Flagged",
+          "Validation-Hash-Verification-Failed",
+          "Validation-Indirect-URL",
+          "Validation-SmartScreen",
+          "Validation-SmartScreen-Error",
+          "Validation-Unapproved-URL",
+          "Validation-Virus-Scan-Error",
+          "Waived-Validation-Defender-Error",
+        ]);
+        const suppress = (reason) => {
+          core.warning(`Validation comment suppressed: ${reason}`);
+          fs.writeFileSync(
+            agentOutputPath,
+            JSON.stringify({
+              items: [{
+                type: "noop",
+                message:
+                  "NOOP: Authoritative validation state changed before publication.",
+              }],
+              errors: [],
+            }),
+          );
+        };
+        const sameIds = (left, right) => {
+          if (left.length !== right.length) return false;
+          const a = [...left].sort((x, y) => x - y);
+          const b = [...right].sort((x, y) => x - y);
+          return a.every((value, index) => value === b[index]);
+        };
+
+        try {
+          if (!fs.existsSync(agentOutputPath)) return;
+          const agentOutput = JSON.parse(
+            fs.readFileSync(agentOutputPath, "utf8"),
+          );
+          if (
+            !Array.isArray(agentOutput?.items) ||
+            !agentOutput.items.some((item) => item?.type === "add_comment")
+          ) {
+            return;
+          }
+
+          const evidence = JSON.parse(fs.readFileSync(evidencePath, "utf8"));
+          const evidenceCheckIds = Array.isArray(evidence?.checks)
+            ? evidence.checks.map((check) => check?.id)
+            : [];
+          if (
+            evidence?.available !== true ||
+            evidence?.pullRequestNumber !== pullRequestNumber ||
+            evidence?.headSha !== triggerHeadSha ||
+            !String(evidence?.operationId ?? "").trim() ||
+            !Number.isSafeInteger(evidence?.completionCheckId) ||
+            evidence.completionCheckId < 1 ||
+            evidenceCheckIds.length < 1 ||
+            evidenceCheckIds.length > 5 ||
+            evidenceCheckIds.some((id) => !Number.isSafeInteger(id) || id < 1) ||
+            new Set(evidenceCheckIds).size !== evidenceCheckIds.length
+          ) {
+            suppress("the collected evidence identity is incomplete");
+            return;
+          }
+
+          const { data: pull } = await github.rest.pulls.get({
+            owner,
+            repo,
+            pull_number: pullRequestNumber,
+          });
+          const labels = Array.isArray(pull.labels)
+            ? pull.labels.map((label) => String(label?.name ?? ""))
+            : null;
+          if (
+            pull.number !== pullRequestNumber ||
+            pull.state !== "open" ||
+            pull.head?.sha !== triggerHeadSha ||
+            pull.base?.repo?.full_name !== `${owner}/${repo}` ||
+            !labels ||
+            !labels.includes("Manifest-Validation-Error") ||
+            labels.some((label) => hardAbortLabels.has(label))
+          ) {
+            suppress("the pull request identity or safety state changed");
+            return;
+          }
+
+          const response = await github.rest.checks.listForRef({
+            owner,
+            repo,
+            ref: triggerHeadSha,
+            app_id: 1451866,
+            filter: "latest",
+            per_page: 100,
+          });
+          const totalCount = response.data?.total_count;
+          const pageChecks = response.data?.check_runs;
+          if (
+            !Number.isSafeInteger(totalCount) ||
+            totalCount < 0 ||
+            totalCount > 100 ||
+            !Array.isArray(pageChecks) ||
+            pageChecks.length !== totalCount
+          ) {
+            suppress("the current Check set is incomplete");
+            return;
+          }
+          const checkRuns = pageChecks.filter(
+            (check) =>
+              check?.app?.slug === "wingetvalidator-prod" &&
+              check.head_sha === triggerHeadSha,
+          );
+          const completionChecks = checkRuns.filter(
+            (check) =>
+              check.name === "10. Validation Completed" &&
+              check.status === "completed",
+          );
+          if (
+            completionChecks.length !== 1 ||
+            completionChecks[0].id !== evidence.completionCheckId ||
+            String(completionChecks[0].external_id ?? "").trim() !==
+              evidence.operationId
+          ) {
+            suppress("the completed validation operation was superseded");
+            return;
+          }
+
+          const completionText = String(
+            completionChecks[0].output?.text ?? "",
+          );
+          if (Buffer.byteLength(completionText, "utf8") > 12000) {
+            suppress("the current completion evidence is oversized");
+            return;
+          }
+          const jsonBlocks = [
+            ...completionText.matchAll(/```json\s*([\s\S]*?)```/gi),
+          ];
+          let completionPayload = null;
+          if (jsonBlocks.length === 1) {
+            try {
+              completionPayload = JSON.parse(jsonBlocks[0][1]);
+            } catch {
+              completionPayload = null;
+            }
+          }
+          if (
+            completionPayload?.PullRequestNumber !== pullRequestNumber ||
+            String(completionPayload?.OperationId ?? "").trim() !==
+              evidence.operationId
+          ) {
+            suppress("the current completion payload is not bound to the operation");
+            return;
+          }
+
+          const failureConclusions = new Set([
+            "failure",
+            "timed_out",
+            "action_required",
+          ]);
+          const currentFailureIds = checkRuns
+            .filter(
+              (check) =>
+                check.id !== completionChecks[0].id &&
+                check.status === "completed" &&
+                String(check.external_id ?? "").trim() ===
+                  evidence.operationId &&
+                failureConclusions.has(
+                  String(check.conclusion ?? "").toLowerCase(),
+                ),
+            )
+            .map((check) => check.id);
+          if (
+            currentFailureIds.some(
+              (id) => !Number.isSafeInteger(id) || id < 1,
+            ) ||
+            !sameIds(currentFailureIds, evidenceCheckIds)
+          ) {
+            suppress("the failed Check set changed");
+          }
+        } catch (error) {
+          suppress(
+            `authoritative revalidation failed (${String(
+              error?.message ?? error,
+            ).replace(/[\r\n]+/g, " ").slice(0, 160)})`,
+          );
         }
 engine: copilot
 permissions:
@@ -421,10 +663,20 @@ current-head evidence line as a duplicate.
 Also emit `noop` if any current label exactly equals one of this hard-abort set:
 
 - `Error-Hash-Mismatch`
+- `Needs-SmartScreen-Investigation`
 - `Package-Flagged`
+- `PUA-Detection`
+- `URL-Validation-Error`
 - `Validation-Defender-Error`
+- `Validation-Domain`
+- `Validation-Hash-Flagged`
+- `Validation-Hash-Verification-Failed`
+- `Validation-Indirect-URL`
 - `Validation-SmartScreen`
+- `Validation-SmartScreen-Error`
+- `Validation-Unapproved-URL`
 - `Validation-Virus-Scan-Error`
+- `Waived-Validation-Defender-Error`
 
 Use exact label equality only; do not broaden this set with substring,
 keyword, or regular-expression matching. If every final gate passes, call
