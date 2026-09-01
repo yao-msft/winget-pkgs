@@ -309,8 +309,10 @@ Emit `noop` unless every condition below is satisfied:
   files, stop.
 - No independent human comment, review, or inline review comment already gives
   specific guidance for this validation failure.
-- No existing comment contains the exact marker
-  `<!-- manifest-validation-diagnosis:<current full head SHA> -->`.
+- No existing comment contains either the exact marker
+  `<!-- manifest-validation-diagnosis:<current full head SHA> -->` or both the
+  canonical `Template: msftbot/authorAssist/manifestValidation` footer and the
+  exact `Head SHA: \`<current full head SHA>\`` evidence line.
 
 Do not treat generic policy-bot guidance as specific human guidance. Treat any
 uncertainty about authorship or whether feedback is automated as human
@@ -412,7 +414,9 @@ Immediately before calling `add_comment`, re-fetch the pull request, labels,
 comments, reviews, and inline review comments. Emit `noop` unless the pull
 request remains open on the same full head SHA, the target label remains
 present, no specific independent-human guidance has appeared, and the exact
-duplicate marker is still absent.
+duplicate marker is still absent. Also treat a comment containing both the
+canonical `Template: msftbot/authorAssist/manifestValidation` footer and exact
+current-head evidence line as a duplicate.
 
 Also emit `noop` if any current label exactly equals one of this hard-abort set:
 
