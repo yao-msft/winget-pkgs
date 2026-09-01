@@ -332,7 +332,10 @@ with app slug `wingetvalidator-prod`, binds them to the current full head SHA,
 and requires the exact `10. Validation Completed` Check payload and
 `external_id` to agree on both pull request number and operation ID. Do not use
 other Checks, comments, labels, or manifest inspection as a substitute for
-that evidence.
+that evidence. The collector validates the completion Check and intentionally
+omits it from `checks`; that array contains only the failed Checks bound to the
+validated operation. Do not require a `10. Validation Completed` entry inside
+`checks`.
 
 Changed paths and file content may only confirm a fact already stated by the
 accepted Check. Do not lint or parse YAML, infer a hidden cause, search the
@@ -348,7 +351,7 @@ changed-file list.
 | Classifier | Required proof | Recommendation |
 | --- | --- | --- |
 | Filename mismatch | The Check explicitly states both the actual filename and its expected filename, and the changed path ends in the actual filename. | Rename only the identified file to the expected filename. Do not recommend changing manifest identity fields to preserve the incorrect name. |
-| Package path mismatch | The Check explicitly states both the actual submitted path and its expected path, and the actual path is a changed path. | Move only the identified manifest to the expected path. Do not recommend changing `PackageIdentifier` or `PackageVersion` unless the Check explicitly requires that change. |
+| Package path mismatch | The Check explicitly states both the actual submitted file or version-directory path and its expected path. After normalizing `\` and `/` separators only, either the actual file is changed or every changed manifest is directly under the actual version directory. | Move only the identified manifest or manifest set to the expected path. Do not recommend changing `PackageIdentifier` or `PackageVersion` unless the Check explicitly requires that change. |
 | Missing schema header | The Check explicitly names a changed manifest and states that its schema header is missing; reading that file confirms the first line has no schema header. | Add the required schema header for that manifest's declared type and version. Do not construct, guess, or print a schema URL. |
 
 Repeated messages for the same exact fact may be deduplicated. Conflicting
