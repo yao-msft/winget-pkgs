@@ -94,7 +94,7 @@ jobs:
               initialPull.state !== 'open' ||
               initialPull.head.sha !== eventHead ||
               initialPull.base.sha !== eventBase ||
-              initialPull.base.ref !== 'master' ||
+              initialPull.base.ref !== 'e2e/final-five-workflows' ||
               initialPull.base.repo?.full_name?.toLowerCase() !== `${owner}/${repo}` ||
               initialPull.user?.login === 'wingetbot' ||
               !Number.isSafeInteger(initialPull.changed_files) ||
@@ -212,7 +212,7 @@ jobs:
               pull.state !== 'open' ||
               pull.head.sha !== eventHead ||
               pull.base.sha !== eventBase ||
-              pull.base.ref !== 'master' ||
+              pull.base.ref !== 'e2e/final-five-workflows' ||
               pull.base.repo?.full_name?.toLowerCase() !== `${owner}/${repo}` ||
               pull.user?.login === 'wingetbot'
             ) {
