@@ -1,0 +1,265 @@
+name: Manifest Metadata Elevation Reminder
+
+on:
+  pull_request_target:
+    branches: [master]
+    types: [opened, reopened, synchronize]
+
+# Fork pull requests are safe here because no pull request content is checked out
+# or executed. The workflow only reads GitHub API state and may create one comment.
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+concurrency:
+  group: manifest-metadata-elevation-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  remind:
+    if: >-
+      github.repository == 'microsoft/winget-pkgs' &&
+      github.event.pull_request.user.login != 'wingetbot'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Post elevation requirement reminder
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const owner = 'microsoft';
+            const repo = 'winget-pkgs';
+            const eventBase = process.env.EVENT_BASE_SHA || '';
+            const eventHead = process.env.EVENT_HEAD_SHA || '';
+            const pullNumber = Number(process.env.PULL_REQUEST_NUMBER);
+            const hardAbortLabels = new Set([
+              'Package-Flagged',
+              'Error-Hash-Mismatch',
+              'Needs-SmartScreen-Investigation',
+              'PUA-Detection',
+              'URL-Validation-Error',
+              'Validation-Defender-Error',
+              'Validation-Domain',
+              'Validation-Hash-Flagged',
+              'Validation-Hash-Verification-Failed',
+              'Validation-Indirect-URL',
+              'Validation-SmartScreen',
+              'Validation-SmartScreen-Error',
+              'Validation-Unapproved-URL',
+              'Validation-Virus-Scan-Error',
+              'Waived-Validation-Defender-Error'
+            ]);
+            const elevationMarker =
+              'Template: msftbot/authorAssist/elevationRequirement';
+            const sectionMarker = '**Elevation requirement:**';
+            const duplicateMarker =
+              `<!-- elevation-requirement-reminder:${eventHead} -->`;
+            const trustedCommenters = new Set([
+              'github-actions[bot]',
+              'msftbot[bot]',
+              'wingetbot'
+            ]);
+            const supportedValues = new Set([
+              'elevatesSelf',
+              'elevationRequired',
+              'elevationProhibited'
+            ]);
+
+            if (
+              !Number.isSafeInteger(pullNumber) ||
+              pullNumber < 1 ||
+              !/^[0-9a-f]{40}$/.test(eventHead) ||
+              !/^[0-9a-f]{40}$/.test(eventBase)
+            ) {
+              core.info('Skipped: invalid trusted event identity.');
+              return;
+            }
+
+            const { data: initialPull } = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: pullNumber
+            });
+            const initialLabels = (initialPull.labels || []).map((label) =>
+              String(label.name || '')
+            );
+            if (
+              initialPull.state !== 'open' ||
+              initialPull.head.sha !== eventHead ||
+              initialPull.base.sha !== eventBase ||
+              initialPull.base.ref !== 'master' ||
+              initialPull.base.repo?.full_name?.toLowerCase() !== `${owner}/${repo}` ||
+              initialPull.user?.login === 'wingetbot' ||
+              !Number.isSafeInteger(initialPull.changed_files) ||
+              initialPull.changed_files < 1 ||
+              initialPull.changed_files > 100 ||
+              initialLabels.some((label) => hardAbortLabels.has(label))
+            ) {
+              core.info('Skipped: pull request state is unsupported or unsafe.');
+              return;
+            }
+
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner,
+              repo,
+              pull_number: pullNumber,
+              per_page: 100,
+              page: 1
+            });
+            if (
+              files.length !== initialPull.changed_files ||
+              new Set(files.map((file) => file.filename)).size !== files.length
+            ) {
+              core.info('Skipped: changed-file evidence is incomplete.');
+              return;
+            }
+
+            const addedValues = new Map();
+            const deletedValues = new Map();
+            const recordValue = (map, value) =>
+              map.set(value, (map.get(value) || 0) + 1);
+            for (const file of files) {
+              const isInstallerManifest =
+                /^manifests\/.+\.installer\.ya?ml$/i.test(file.filename);
+              if (
+                !isInstallerManifest ||
+                !['added', 'modified', 'renamed'].includes(file.status)
+              ) {
+                continue;
+              }
+              if (typeof file.patch !== 'string') {
+                core.info('Skipped: an installer diff patch is unavailable.');
+                return;
+              }
+              const patchLines = file.patch.split('\n');
+              const additions = patchLines.filter(
+                (line) => line.startsWith('+') && !line.startsWith('+++')
+              ).length;
+              const deletions = patchLines.filter(
+                (line) => line.startsWith('-') && !line.startsWith('---')
+              ).length;
+              if (additions !== file.additions || deletions !== file.deletions) {
+                core.info('Skipped: an installer diff patch is incomplete.');
+                return;
+              }
+              for (const line of patchLines) {
+                const match = line.match(
+                  /^([+-])\s*ElevationRequirement:\s*([A-Za-z]+)\s*(?:#.*)?$/
+                );
+                if (match && supportedValues.has(match[2])) {
+                  recordValue(
+                    match[1] === '+' ? addedValues : deletedValues,
+                    match[2]
+                  );
+                }
+              }
+            }
+            const values = [...addedValues].filter(
+              ([value, count]) => count > (deletedValues.get(value) || 0)
+            );
+            if (values.length !== 1) {
+              core.info('Skipped: no unique supported ElevationRequirement change was found.');
+              return;
+            }
+            const [[elevationValue]] = values;
+
+            const [comments, reviews, reviewComments] = await Promise.all([
+                github.paginate(github.rest.issues.listComments, {
+                  owner,
+                  repo,
+                  issue_number: pullNumber,
+                  per_page: 100
+                }),
+                github.paginate(github.rest.pulls.listReviews, {
+                  owner,
+                  repo,
+                  pull_number: pullNumber,
+                  per_page: 100
+                }),
+                github.paginate(github.rest.pulls.listReviewComments, {
+                  owner,
+                  repo,
+                  pull_number: pullNumber,
+                  per_page: 100
+                })
+            ]);
+            const { data: pull } = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: pullNumber
+            });
+            const labels = (pull.labels || []).map((label) =>
+              String(label.name || '')
+            );
+            const isIndependentHuman = (entry) =>
+              entry.user?.type === 'User' &&
+              Boolean(entry.user?.login) &&
+              entry.user.login !== pull.user?.login &&
+              entry.user.login !== 'wingetbot';
+            const isDuplicate = comments.some((comment) =>
+              trustedCommenters.has(comment.user?.login) &&
+              (comment.body || '').includes(duplicateMarker)
+            );
+
+            if (
+              pull.state !== 'open' ||
+              pull.head.sha !== eventHead ||
+              pull.base.sha !== eventBase ||
+              pull.base.ref !== 'master' ||
+              pull.base.repo?.full_name?.toLowerCase() !== `${owner}/${repo}` ||
+              pull.user?.login === 'wingetbot'
+            ) {
+              core.info('Skipped: pull request state changed during evaluation.');
+              return;
+            }
+            if (labels.some((label) => hardAbortLabels.has(label))) {
+              core.info('Skipped: a security or integrity hard-abort label is active.');
+              return;
+            }
+            if (
+              comments.some(isIndependentHuman) ||
+              reviews.some(isIndependentHuman) ||
+              reviewComments.some(isIndependentHuman)
+            ) {
+              core.info('Skipped: independent human feedback already exists.');
+              return;
+            }
+            if (isDuplicate) {
+              core.info('Skipped: this head already has an elevation reminder.');
+              return;
+            }
+
+            const commentBody = [
+              '> [!NOTE]',
+              '> **Automated recommend-only reminder - verify before acting.**',
+              '',
+              sectionMarker,
+              `This pull request adds a diff line that sets \`ElevationRequirement\` to \`${elevationValue}\`. Please confirm the selected value matches documented installer behavior:`,
+              '',
+              '- `elevatesSelf`: the installer conditionally decides whether elevation is needed.',
+              '- `elevationRequired`: the installer always requires elevation.',
+              '- `elevationProhibited`: the installer must not run elevated.',
+              '',
+              'A UAC prompt by itself does not establish `elevatesSelf`.',
+              '',
+              '<details><summary>Review evidence</summary>',
+              '',
+              `- **Head SHA:** \`${eventHead}\``,
+              '</details>',
+              '',
+              duplicateMarker,
+              `###### ${elevationMarker}`
+            ].join('\n');
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: pullNumber,
+              body: commentBody
+            });
