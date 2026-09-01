@@ -71,6 +71,108 @@ jobs:
               'elevationRequired',
               'elevationProhibited'
             ]);
+            const installerPath =
+              /^manifests\/.+\.installer\.ya?ml$/i;
+            const maxManifestBytes = 1024 * 1024;
+            const recordValue = (map, value) =>
+              map.set(value, (map.get(value) || 0) + 1);
+
+            function elevationValues(content) {
+              const values = [];
+              let inInstallers = false;
+              let sequenceIndent = null;
+              let hasInstaller = false;
+              const valuePattern =
+                /^ElevationRequirement:\s*([A-Za-z]+)\s*(?:#.*)?$/;
+              const record = (text) => {
+                const match = text.match(valuePattern);
+                if (match && supportedValues.has(match[1])) {
+                  values.push(match[1]);
+                }
+              };
+
+              for (const line of content.replace(/\r\n/g, '\n').split('\n')) {
+                if (!line.trim() || /^\s*#/.test(line)) {
+                  continue;
+                }
+                if (/^ *\t/.test(line)) {
+                  throw new Error('Manifest YAML contains tab indentation.');
+                }
+                const indent = line.match(/^ */)[0].length;
+                const text = line.slice(indent);
+                const item = text.match(/^-\s+(.+)$/);
+
+                if (
+                  inInstallers &&
+                  item &&
+                  (sequenceIndent === null || indent === sequenceIndent)
+                ) {
+                  if (indent !== 0 && indent !== 2) {
+                    throw new Error('Installers sequence indentation is unsupported.');
+                  }
+                  sequenceIndent = indent;
+                  hasInstaller = true;
+                  record(item[1]);
+                  continue;
+                }
+
+                if (indent === 0) {
+                  record(text);
+                  inInstallers = /^Installers:\s*(?:#.*)?$/.test(text);
+                  sequenceIndent = null;
+                  hasInstaller = false;
+                  continue;
+                }
+
+                if (
+                  inInstallers &&
+                  hasInstaller &&
+                  sequenceIndent !== null &&
+                  indent === sequenceIndent + 2
+                ) {
+                  record(text);
+                }
+              }
+              return values;
+            }
+
+            async function readManifest(repositoryOwner, repositoryName, path, ref) {
+              const response = await github.rest.repos.getContent({
+                owner: repositoryOwner,
+                repo: repositoryName,
+                path,
+                ref
+              });
+              const file = response.data;
+              if (
+                Array.isArray(file) ||
+                file?.type !== 'file' ||
+                file?.path !== path ||
+                file?.encoding !== 'base64' ||
+                !Number.isSafeInteger(file?.size) ||
+                file.size < 0 ||
+                file.size > maxManifestBytes ||
+                typeof file?.content !== 'string'
+              ) {
+                throw new Error('Manifest content response was incomplete.');
+              }
+              const encoded = file.content.replace(/\s/g, '');
+              if (
+                encoded.length % 4 !== 0 ||
+                !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)
+              ) {
+                throw new Error('Manifest content was not valid base64.');
+              }
+              const bytes = Buffer.from(encoded, 'base64');
+              if (bytes.length !== file.size) {
+                throw new Error('Manifest content size did not match its metadata.');
+              }
+              const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+              if (text.includes('\0')) {
+                throw new Error('Manifest content contained a null byte.');
+              }
+              return text;
+            }
 
             if (
               !Number.isSafeInteger(pullNumber) ||
@@ -87,6 +189,10 @@ jobs:
               repo,
               pull_number: pullNumber
             });
+            const headRepository = String(
+              initialPull.head?.repo?.full_name || ''
+            );
+            const headRepositoryParts = headRepository.split('/');
             const initialLabels = (initialPull.labels || []).map((label) =>
               String(label.name || '')
             );
@@ -96,7 +202,10 @@ jobs:
               initialPull.base.sha !== eventBase ||
               initialPull.base.ref !== 'master' ||
               initialPull.base.repo?.full_name?.toLowerCase() !== `${owner}/${repo}` ||
+              headRepositoryParts.length !== 2 ||
+              headRepositoryParts.some((part) => !part) ||
               initialPull.user?.login === 'wingetbot' ||
+              !Array.isArray(initialPull.labels) ||
               !Number.isSafeInteger(initialPull.changed_files) ||
               initialPull.changed_files < 1 ||
               initialPull.changed_files > 100 ||
@@ -115,7 +224,20 @@ jobs:
             });
             if (
               files.length !== initialPull.changed_files ||
-              new Set(files.map((file) => file.filename)).size !== files.length
+              new Set(files.map((file) => file.filename)).size !== files.length ||
+              files.some(
+                (file) =>
+                  typeof file?.filename !== 'string' ||
+                  !file.filename ||
+                  typeof file?.status !== 'string' ||
+                  (
+                    file.status === 'renamed' &&
+                    (
+                      typeof file.previous_filename !== 'string' ||
+                      !file.previous_filename
+                    )
+                  )
+              )
             ) {
               core.info('Skipped: changed-file evidence is incomplete.');
               return;
@@ -123,41 +245,55 @@ jobs:
 
             const addedValues = new Map();
             const deletedValues = new Map();
-            const recordValue = (map, value) =>
-              map.set(value, (map.get(value) || 0) + 1);
             for (const file of files) {
-              const isInstallerManifest =
-                /^manifests\/.+\.installer\.ya?ml$/i.test(file.filename);
-              if (
-                !isInstallerManifest ||
-                !['added', 'modified', 'renamed'].includes(file.status)
-              ) {
+              const currentInstaller = installerPath.test(file.filename);
+              const previousInstaller =
+                typeof file.previous_filename === 'string' &&
+                installerPath.test(file.previous_filename);
+              const baseInstaller =
+                file.status === 'renamed'
+                  ? previousInstaller
+                  : currentInstaller;
+              if (!currentInstaller && !previousInstaller) {
                 continue;
               }
-              if (typeof file.patch !== 'string') {
-                core.info('Skipped: an installer diff patch is unavailable.');
+              if (
+                file.status === 'renamed' &&
+                currentInstaller !== previousInstaller
+              ) {
+                core.info('Skipped: a rename changed installer manifest classification.');
                 return;
               }
-              const patchLines = file.patch.split('\n');
-              const additions = patchLines.filter(
-                (line) => line.startsWith('+') && !line.startsWith('+++')
-              ).length;
-              const deletions = patchLines.filter(
-                (line) => line.startsWith('-') && !line.startsWith('---')
-              ).length;
-              if (additions !== file.additions || deletions !== file.deletions) {
-                core.info('Skipped: an installer diff patch is incomplete.');
+              if (
+                !['added', 'modified', 'removed', 'renamed'].includes(file.status)
+              ) {
+                core.info('Skipped: an installer file status is unsupported.');
                 return;
               }
-              for (const line of patchLines) {
-                const match = line.match(
-                  /^([+-])\s*ElevationRequirement:\s*([A-Za-z]+)\s*(?:#.*)?$/
+              if (file.status !== 'added' && baseInstaller) {
+                const previousPath =
+                  file.status === 'renamed'
+                    ? file.previous_filename
+                    : file.filename;
+                const before = await readManifest(
+                  owner,
+                  repo,
+                  previousPath,
+                  eventBase
                 );
-                if (match && supportedValues.has(match[2])) {
-                  recordValue(
-                    match[1] === '+' ? addedValues : deletedValues,
-                    match[2]
-                  );
+                for (const value of elevationValues(before)) {
+                  recordValue(deletedValues, value);
+                }
+              }
+              if (file.status !== 'removed' && currentInstaller) {
+                const after = await readManifest(
+                  headRepositoryParts[0],
+                  headRepositoryParts[1],
+                  file.filename,
+                  eventHead
+                );
+                for (const value of elevationValues(after)) {
+                  recordValue(addedValues, value);
                 }
               }
             }
@@ -211,10 +347,12 @@ jobs:
             if (
               pull.state !== 'open' ||
               pull.head.sha !== eventHead ||
+              pull.head?.repo?.full_name !== headRepository ||
               pull.base.sha !== eventBase ||
               pull.base.ref !== 'master' ||
               pull.base.repo?.full_name?.toLowerCase() !== `${owner}/${repo}` ||
-              pull.user?.login === 'wingetbot'
+              pull.user?.login === 'wingetbot' ||
+              !Array.isArray(pull.labels)
             ) {
               core.info('Skipped: pull request state changed during evaluation.');
               return;
