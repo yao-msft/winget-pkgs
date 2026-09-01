@@ -491,6 +491,7 @@ post-steps:
           );
         }
 engine: copilot
+model: gpt-5.4
 permissions:
   checks: read
   contents: read
