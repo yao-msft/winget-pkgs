@@ -379,7 +379,7 @@ jobs:
               '> **Automated recommend-only reminder - verify before acting.**',
               '',
               sectionMarker,
-              `This pull request adds a diff line that sets \`ElevationRequirement\` to \`${elevationValue}\`. Please confirm the selected value matches documented installer behavior:`,
+              `This pull request adds or changes an \`ElevationRequirement\` field to \`${elevationValue}\`. Please confirm the selected value matches documented installer behavior:`,
               '',
               '- `elevatesSelf`: the installer conditionally decides whether elevation is needed.',
               '- `elevationRequired`: the installer always requires elevation.',
