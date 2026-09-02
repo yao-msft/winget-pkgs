@@ -7,7 +7,7 @@ on:
 
 concurrency:
   group: stale-needs-cla-reconciliation
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   checks: read
@@ -30,7 +30,6 @@ jobs:
             const policyAppId = 95686;
             const searchPageSize = 100;
             const candidateBudget = 250;
-            const detailLimit = 75;
             const requestConcurrency = 6;
             const { owner, repo } = context.repo;
             const escapeMarkdown = (value) =>
@@ -304,7 +303,7 @@ jobs:
               ) {
                 throw new Error("Needs-CLA Search enumeration was incomplete");
               }
-              return numbers;
+              return numbers.sort((left, right) => left - right);
             }
             const repository = await github.request(
               "GET /repos/{owner}/{repo}", { owner, repo });
@@ -334,8 +333,7 @@ jobs:
             for (const record of records) {
               counts[record.kind]++;
             }
-            const displayed = records.slice(0, detailLimit);
-            const detailOmitted = records.length - displayed.length;
+            const displayed = records;
             const lines = [
               "# Stale Needs-CLA reconciliation audit",
               "",
@@ -346,7 +344,6 @@ jobs:
               `- Authoritative completed/success candidates: **${counts.candidate}**`,
               `- Unresolved: **${counts.unresolved}**`,
               `- Changed or ineligible PRs skipped: **${counts.skipped}**`,
-              `- Detail rows omitted by the ${detailLimit}-row summary cap: **${detailOmitted}**`,
               "",
             ];
             let priorAuthor;
