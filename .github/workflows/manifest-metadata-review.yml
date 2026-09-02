@@ -3,11 +3,12 @@ name: Manifest Metadata Elevation Reminder
 on:
   pull_request_target:
     branches: [master]
-    types: [opened, reopened, synchronize]
+    types: [labeled]
 
 # Fork pull requests are safe here because no pull request content is checked out
-# or executed. The workflow only reads GitHub API state and may create one comment.
+# or executed. The workflow only reads trusted GitHub API state and may comment.
 permissions:
+  checks: read
   contents: read
   issues: write
   pull-requests: read
@@ -20,7 +21,18 @@ jobs:
   remind:
     if: >-
       github.repository == 'microsoft/winget-pkgs' &&
-      github.event.pull_request.user.login != 'wingetbot'
+      github.event.action == 'labeled' &&
+      github.event.label.name == 'Validation-Completed' &&
+      (
+        (
+          github.event.sender.login == 'wingetvalidator-prod[bot]' &&
+          github.event.sender.type == 'Bot'
+        ) ||
+        (
+          github.event.sender.login == 'wingetbot' &&
+          github.event.sender.type == 'User'
+        )
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -28,18 +40,20 @@ jobs:
       - name: Post elevation requirement reminder
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EVENT_PULL_NUMBER: ${{ github.event.pull_request.number }}
           EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         with:
           github-token: ${{ github.token }}
           script: |
             const owner = 'microsoft';
             const repo = 'winget-pkgs';
-            const eventBase = process.env.EVENT_BASE_SHA || '';
+            const pullNumberText = process.env.EVENT_PULL_NUMBER || '';
+            const eventPullNumber = Number(pullNumberText);
             const eventHead = process.env.EVENT_HEAD_SHA || '';
-            const pullNumber = Number(process.env.PULL_REQUEST_NUMBER);
+            const eventBase = process.env.EVENT_BASE_SHA || '';
             const hardAbortLabels = new Set([
+              'Binary-Validation-Error',
               'Package-Flagged',
               'Error-Hash-Mismatch',
               'Needs-SmartScreen-Investigation',
@@ -47,6 +61,7 @@ jobs:
               'URL-Validation-Error',
               'Validation-Defender-Error',
               'Validation-Domain',
+              'Validation-Executable-Error',
               'Validation-Hash-Flagged',
               'Validation-Hash-Verification-Failed',
               'Validation-Indirect-URL',
@@ -71,9 +86,152 @@ jobs:
               'elevationRequired',
               'elevationProhibited'
             ]);
+            const parseTrustedCompletion = (
+              check,
+              headSha,
+              expectedPullNumber = null
+            ) => {
+              if (
+                !check ||
+                !Number.isSafeInteger(check.id) ||
+                check.id < 1 ||
+                check?.app?.id !== 1451866 ||
+                check.app.slug !== 'wingetvalidator-prod' ||
+                check.head_sha !== headSha ||
+                check.name !== '10. Validation Completed' ||
+                check.status !== 'completed' ||
+                check.conclusion !== 'success' ||
+                typeof check.external_id !== 'string' ||
+                !check.external_id
+              ) {
+                return null;
+              }
+              const text = check.output?.text;
+              if (typeof text !== 'string' || text.length > 12000) {
+                return null;
+              }
+              const blocks = [
+                ...text.matchAll(/```json\s*([\s\S]*?)```/gi)
+              ];
+              if (blocks.length !== 1) {
+                return null;
+              }
+              let payload;
+              try {
+                payload = JSON.parse(blocks[0][1]);
+              } catch {
+                return null;
+              }
+              if (
+                !payload ||
+                typeof payload !== 'object' ||
+                Array.isArray(payload) ||
+                !Number.isSafeInteger(payload.PullRequestNumber) ||
+                payload.PullRequestNumber < 1 ||
+                (
+                  expectedPullNumber !== null &&
+                  payload.PullRequestNumber !== expectedPullNumber
+                ) ||
+                payload.OperationId !== check.external_id ||
+                !Array.isArray(payload.Labels)
+              ) {
+                return null;
+              }
+              const successLabels = payload.Labels.filter((label) =>
+                label &&
+                typeof label === 'object' &&
+                !Array.isArray(label) &&
+                label.Name === 'Validation-Completed' &&
+                label.Result === 'Success'
+              );
+              return successLabels.length === 1 ? payload : null;
+            };
+            const validationBackoffMs = [0, 2000, 4000, 8000, 16000, 30000];
+            const wait = (milliseconds) =>
+              new Promise((resolve) => setTimeout(resolve, milliseconds));
+            const findTrustedCompletedValidation = async (
+              headSha,
+              pullNumber,
+              expected = null
+            ) => {
+              const response = await github.rest.checks.listForRef({
+                owner,
+                repo,
+                ref: headSha,
+                app_id: 1451866,
+                filter: 'latest',
+                per_page: 100
+              });
+              const total = response.data?.total_count;
+              const checks = response.data?.check_runs;
+              if (
+                !Number.isSafeInteger(total) ||
+                total < 0 ||
+                total > 100 ||
+                !Array.isArray(checks) ||
+                checks.length !== total
+              ) {
+                throw new Error('Validator Check set response was incomplete.');
+              }
+              const completions = checks.filter((check) =>
+                check?.app?.id === 1451866 &&
+                check?.app?.slug === 'wingetvalidator-prod' &&
+                check.head_sha === headSha &&
+                check.name === '10. Validation Completed' &&
+                check.status === 'completed'
+              );
+              if (completions.length !== 1) {
+                return null;
+              }
+              const check = completions[0];
+              const payload = parseTrustedCompletion(
+                check,
+                headSha,
+                pullNumber
+              );
+              if (
+                payload === null ||
+                (
+                  expected !== null &&
+                  (
+                    check.id !== expected.checkId ||
+                    payload.OperationId !== expected.operationId
+                  )
+                )
+              ) {
+                return null;
+              }
+              return Object.freeze({
+                checkId: check.id,
+                operationId: payload.OperationId
+              });
+            };
+            const pollTrustedCompletedValidation = async (
+              headSha,
+              pullNumber
+            ) => {
+              for (
+                let attempt = 0;
+                attempt < validationBackoffMs.length;
+                attempt += 1
+              ) {
+                if (validationBackoffMs[attempt] > 0) {
+                  await wait(validationBackoffMs[attempt]);
+                }
+                const completion = await findTrustedCompletedValidation(
+                  headSha,
+                  pullNumber
+                );
+                if (completion !== null) {
+                  return completion;
+                }
+              }
+              return null;
+            };
             const installerPath =
               /^manifests\/.+\.installer\.ya?ml$/i;
             const maxManifestBytes = 1024 * 1024;
+            const maxContentResponseBytes = 2 * 1024 * 1024;
             const recordValue = (map, value) =>
               map.set(value, (map.get(value) || 0) + 1);
 
@@ -136,27 +294,22 @@ jobs:
               return values;
             }
 
-            async function readManifest(repositoryOwner, repositoryName, path, ref) {
-              const response = await github.rest.repos.getContent({
-                owner: repositoryOwner,
-                repo: repositoryName,
-                path,
-                ref
-              });
-              const file = response.data;
+            function decodeContent(file, path) {
               if (
+                !file ||
+                typeof file !== 'object' ||
                 Array.isArray(file) ||
-                file?.type !== 'file' ||
-                file?.path !== path ||
-                file?.encoding !== 'base64' ||
-                !Number.isSafeInteger(file?.size) ||
+                file.type !== 'file' ||
+                file.path !== path ||
+                file.encoding !== 'base64' ||
+                !Number.isSafeInteger(file.size) ||
                 file.size < 0 ||
                 file.size > maxManifestBytes ||
-                typeof file?.content !== 'string'
+                typeof file.content !== 'string'
               ) {
                 throw new Error('Manifest content response was incomplete.');
               }
-              const encoded = file.content.replace(/\s/g, '');
+              const encoded = file.content.replace(/[\r\n]/g, '');
               if (
                 encoded.length % 4 !== 0 ||
                 !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)
@@ -174,9 +327,115 @@ jobs:
               return text;
             }
 
+            async function readManifest(repositoryOwner, repositoryName, path, ref) {
+              if (
+                repositoryOwner.toLowerCase() === owner &&
+                repositoryName.toLowerCase() === repo
+              ) {
+                const response = await github.rest.repos.getContent({
+                  owner,
+                  repo,
+                  path,
+                  ref
+                });
+                return decodeContent(response.data, path);
+              }
+              if (
+                !/^(?!.*--)[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(repositoryOwner) ||
+                !/^[A-Za-z0-9._-]{1,100}$/.test(repositoryName) ||
+                repositoryName === '.' ||
+                repositoryName === '..'
+              ) {
+                throw new Error('Fork repository identity was invalid.');
+              }
+              const encodedPath = path
+                .split('/')
+                .map((part) => encodeURIComponent(part))
+                .join('/');
+              const url =
+                `https://api.github.com/repos/${encodeURIComponent(repositoryOwner)}/` +
+                `${encodeURIComponent(repositoryName)}/contents/${encodedPath}` +
+                `?ref=${encodeURIComponent(ref)}`;
+              const response = await fetch(url, {
+                method: 'GET',
+                redirect: 'error',
+                signal: AbortSignal.timeout(10000),
+                headers: {
+                  Accept: 'application/vnd.github+json',
+                  'Accept-Encoding': 'identity',
+                  'User-Agent': 'manifest-metadata-review'
+                }
+              });
+              if (response.redirected) {
+                throw new Error('Fork content API redirected unexpectedly.');
+              }
+              const contentLengthText = response.headers.get('content-length');
+              let contentLength = null;
+              if (contentLengthText !== null) {
+                if (!/^[1-9][0-9]*$/.test(contentLengthText)) {
+                  throw new Error('Fork content API Content-Length was invalid.');
+                }
+                contentLength = Number(contentLengthText);
+                if (
+                  !Number.isSafeInteger(contentLength) ||
+                  contentLength > maxContentResponseBytes
+                ) {
+                  throw new Error(
+                    'Fork content API response exceeded its byte limit.'
+                  );
+                }
+              }
+              if (!response.body || typeof response.body.getReader !== 'function') {
+                throw new Error('Fork content API response body was unavailable.');
+              }
+              const chunks = [];
+              let actualLength = 0;
+              const reader = response.body.getReader();
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) {
+                  break;
+                }
+                if (!(value instanceof Uint8Array)) {
+                  throw new Error('Fork content API response body was invalid.');
+                }
+                actualLength += value.byteLength;
+                if (actualLength > maxContentResponseBytes) {
+                  throw new Error('Fork content API response exceeded its byte limit.');
+                }
+                chunks.push(value);
+              }
+              if (
+                contentLength !== null &&
+                actualLength !== contentLength
+              ) {
+                throw new Error('Fork content API response size was invalid.');
+              }
+              const bytes = new Uint8Array(actualLength);
+              let offset = 0;
+              for (const chunk of chunks) {
+                bytes.set(chunk, offset);
+                offset += chunk.byteLength;
+              }
+              const responseText =
+                new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+              if (!response.ok) {
+                throw new Error(
+                  `Fork content API request failed with status ${response.status}.`
+                );
+              }
+              let file;
+              try {
+                file = JSON.parse(responseText);
+              } catch {
+                throw new Error('Fork content API response was not valid JSON.');
+              }
+              return decodeContent(file, path);
+            }
+
             if (
-              !Number.isSafeInteger(pullNumber) ||
-              pullNumber < 1 ||
+              !/^[1-9][0-9]*$/.test(pullNumberText) ||
+              !Number.isSafeInteger(eventPullNumber) ||
               !/^[0-9a-f]{40}$/.test(eventHead) ||
               !/^[0-9a-f]{40}$/.test(eventBase)
             ) {
@@ -184,6 +443,7 @@ jobs:
               return;
             }
 
+            const pullNumber = eventPullNumber;
             const { data: initialPull } = await github.rest.pulls.get({
               owner,
               repo,
@@ -206,12 +466,19 @@ jobs:
               headRepositoryParts.some((part) => !part) ||
               initialPull.user?.login === 'wingetbot' ||
               !Array.isArray(initialPull.labels) ||
+              !initialLabels.includes('Validation-Completed') ||
               !Number.isSafeInteger(initialPull.changed_files) ||
               initialPull.changed_files < 1 ||
               initialPull.changed_files > 100 ||
               initialLabels.some((label) => hardAbortLabels.has(label))
             ) {
               core.info('Skipped: pull request state is unsupported or unsafe.');
+              return;
+            }
+            const validationCompletion =
+              await pollTrustedCompletedValidation(eventHead, pullNumber);
+            if (validationCompletion === null) {
+              core.info('Skipped: trusted validation has not completed for this head.');
               return;
             }
 
@@ -334,11 +601,22 @@ jobs:
             const labels = (pull.labels || []).map((label) =>
               String(label.name || '')
             );
-            const isIndependentHuman = (entry) =>
-              entry.user?.type === 'User' &&
-              Boolean(entry.user?.login) &&
-              entry.user.login !== pull.user?.login &&
-              entry.user.login !== 'wingetbot';
+            const isIndependentHuman = (entry) => {
+              const login = entry?.user?.login;
+              const type = entry?.user?.type;
+              if (type === 'Bot') {
+                return false;
+              }
+              return !(
+                type === 'User' &&
+                typeof login === 'string' &&
+                login &&
+                (
+                  login === pull.user?.login ||
+                  login === 'wingetbot'
+                )
+              );
+            };
             const isDuplicate = comments.some((comment) =>
               trustedCommenters.has(comment.user?.login) &&
               (comment.body || '').includes(duplicateMarker)
@@ -355,6 +633,19 @@ jobs:
               !Array.isArray(pull.labels)
             ) {
               core.info('Skipped: pull request state changed during evaluation.');
+              return;
+            }
+            if (
+              !labels.includes('Validation-Completed') ||
+              (
+                await findTrustedCompletedValidation(
+                  eventHead,
+                  pullNumber,
+                  validationCompletion
+                )
+              ) === null
+            ) {
+              core.info('Skipped: trusted validation is no longer complete for this head.');
               return;
             }
             if (labels.some((label) => hardAbortLabels.has(label))) {
