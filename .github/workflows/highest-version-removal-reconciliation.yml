@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
 concurrency:
   group: highest-version-removal-reconciliation
-  cancel-in-progress: true
+  cancel-in-progress: false
 permissions:
   contents: read
   pull-requests: read
@@ -139,12 +139,16 @@ jobs:
                   }
                   const headSha = pull.head?.sha;
                   const baseSha = pull.base?.sha;
-                  if (!/^[0-9a-f]{40}$/i.test(headSha ?? "")) {
-                    recordSkip(number, "pull request head SHA is unavailable");
-                    continue;
-                  }
-                  if (baseSha !== defaultHeadSha) {
-                    recordSkip(number, "pull request base is not the audited default-branch SHA");
+                  const headRepo = pull.head?.repo?.full_name;
+                  const baseRepo = pull.base?.repo?.full_name;
+                  if (
+                    !/^[0-9a-f]{40}$/i.test(headSha ?? "") ||
+                    !/^[0-9a-f]{40}$/i.test(baseSha ?? "") ||
+                    typeof headRepo !== "string" ||
+                    !headRepo ||
+                    baseRepo !== `${owner}/${repo}`
+                  ) {
+                    recordSkip(number, "pull request repository or SHA identity is unavailable");
                     continue;
                   }
                   if (
@@ -181,7 +185,9 @@ jobs:
                     finalPull.base.ref !== defaultBranch ||
                     !finalLabels.includes(targetLabel) ||
                     finalPull.head?.sha !== headSha ||
+                    finalPull.head?.repo?.full_name !== headRepo ||
                     finalPull.base?.sha !== baseSha ||
+                    finalPull.base?.repo?.full_name !== baseRepo ||
                     finalPull.changed_files !== pull.changed_files
                   ) {
                     recordSkip(number, "pull request changed during file enumeration");
