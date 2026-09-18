@@ -542,9 +542,23 @@ safe-outputs:
                 core.info("Final pull request gate suppressed the comment.");
                 return;
               }
+              const rendered = `${body}\n\n${footer}`;
+              // This job hardcodes the production target, so any other host
+              // (fork dispatch, trial repository) must preview, not post.
+              const staged = process.env.GH_AW_SAFE_OUTPUTS_STAGED === "true";
+              const foreignHost = process.env.GITHUB_REPOSITORY !== `${owner}/${repo}`;
+              if (staged || foreignHost) {
+                const why = staged ? "staged mode" : "non-production host";
+                core.info(`Preview only (${why}); no comment was posted.`);
+                await core.summary
+                  .addHeading("Elevation Review Preview", 2)
+                  .addRaw(`Would comment on ${owner}/${repo}#${target} (${why}).`)
+                  .addCodeBlock(rendered, "markdown")
+                  .write();
+                return;
+              }
               await github.rest.issues.createComment({
-                owner, repo, issue_number: target,
-                body: `${body}\n\n${footer}`,
+                owner, repo, issue_number: target, body: rendered,
               });
 ---
 
