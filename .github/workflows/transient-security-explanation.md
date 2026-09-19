@@ -801,9 +801,11 @@ waive, rerun, or invoke wingetbot.
 With read-only GitHub tools, require the PR to remain open on the evidence head with the target
 label, no conflicting classifier label, and a non-wingetbot author. Read issue comments, reviews,
 and PR review comments. `noop` on a footer+head duplicate or specific human feedback about this
-result, contention, or revalidation. Bots and generic policy messages do not count. A
-`stephengillie` comment is automation only if it begins `Automatic Validation ended with:` and
-contains `(Deterministic automation - build <number>.)`; other specific feedback counts.
+result, contention, or revalidation. Bots and generic policy messages do not count. A comment whose
+entire content is a bot command requesting revalidation, such as `@wingetbot run`, is a re-run
+request, not feedback, and does not count; a command that also waives, overrides, or explains does
+count. A `stephengillie` comment is automation only if it begins `Automatic Validation ended with:`
+and contains `(Deterministic automation - build <number>.)`; other specific feedback counts.
 Immediately before responding, re-read the PR, labels, all three comment/review sources, and repeat
 every gate. Missing, ambiguous, or changed data is `noop`; do not explain it. Otherwise call
 `post_transient_security_comment` once with only required field `body` and this exact body:
