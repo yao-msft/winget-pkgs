@@ -643,8 +643,11 @@ safe-outputs:
                 `> Head SHA: \`${eventHead}\``,
               ].join("\n");
               const body = items[0].body;
+              const proseOf = (value) => String(value).split(/\r?\n/)
+                .map((line) => line.replace(/^\s*>\s?/, ""))
+                .join(" ").replace(/\s+/g, " ").trim();
               if (typeof body !== "string" || body.length < 200 || body.length > 1200 ||
-                  body.includes("@") || body.trim() !== expectedBody) return;
+                  body.includes("@") || proseOf(body) !== proseOf(expectedBody)) return;
               const { data: pull } = await github.rest.pulls.get({
                 owner, repo, pull_number: prNumber,
               });
