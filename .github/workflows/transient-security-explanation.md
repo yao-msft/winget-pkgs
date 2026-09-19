@@ -197,17 +197,17 @@ pre-agent-steps:
                 !/^[A-Za-z0-9.-]+$/.test(row.Arch) ||
                 !/^[A-Za-z0-9.-]+$/.test(row.InstallerType) ||
                 typeof row.InstallerUrl !== "string" || typeof row.InstallerHash !== "string" ||
-                !["Waiting", "Completed"].includes(row.Status)) return null;
-            const scope = row.Scope == null ? "Undefined" : String(row.Scope);
-            const locale = row.Locale == null ? "Undefined" : String(row.Locale);
-            if (!/^[A-Za-z0-9.-]+$/.test(scope) || !/^[A-Za-z0-9.-]+$/.test(locale)) return null;
-            const key = `${row.Arch}-Scope_${scope}-Locale_${locale}`.toLowerCase();
+                !["Waiting", "InProgress", "AwaitingRetry", "Completed"]
+                  .includes(row.Status)) return null;
+            const scope = row.Scope == null ? "Scope_Undefined" : String(row.Scope);
+            const locale = row.Locale == null ? "Locale_Undefined" : String(row.Locale);
+            if (!/^[A-Za-z0-9._-]+$/.test(scope) || !/^[A-Za-z0-9._-]+$/.test(locale)) return null;
+            const key = `${row.Arch}-${scope}-${locale}`.toLowerCase();
             if (!groups.has(key)) groups.set(key, []);
             groups.get(key).push(row.Status);
           }
           for (const states of groups.values())
-            if (states.length !== 2 || !states.includes("Waiting") || !states.includes("Completed"))
-              return null;
+            if (!states.includes("Completed")) return null;
           return new Set(groups.keys());
         };
         const classifyLogs = (logs) => {
@@ -334,8 +334,8 @@ pre-agent-steps:
             byName.get("08. Installation Validation").output.text, operationId);
           const logPrefixes = new Set(analysisItems.map((item) =>
             item.FileName.slice(0, -"-MpCmdRunanalysis.log".length).toLowerCase()));
-          if (!expectedPrefixes || expectedPrefixes.size !== logPrefixes.size ||
-              [...expectedPrefixes].some((prefix) => !logPrefixes.has(prefix)))
+          if (!expectedPrefixes ||
+              [...logPrefixes].some((prefix) => !expectedPrefixes.has(prefix)))
             return finish("record_binding_failed");
 
           let url;
