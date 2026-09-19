@@ -148,7 +148,7 @@ pre-agent-steps:
             if (end > eocd || (flags & ~0x800) !== 0 || ![0, 8].includes(method) ||
                 extraLength > 256 || commentLength > 256 ||
                 [compressedSize, size, localOffset].includes(0xffffffff) ||
-                size > 100000 || compressedSize > artifact.ZipFileSizeBytes ||
+                size > 1000000 || compressedSize > artifact.ZipFileSizeBytes ||
                 (compressedSize === 0 ? size !== 0 : size > compressedSize * 100 + 1024))
               throw new Error("zip_limits");
             const name = decoder.decode(zip.subarray(offset + 46, offset + 46 + nameLength));
@@ -307,7 +307,7 @@ pre-agent-steps:
               !Number.isSafeInteger(artifact.TotalFilesCount) ||
               artifact.TotalFilesCount <= 0 || artifact.TotalFilesCount > 64 ||
               !Number.isSafeInteger(artifact.TotalSizeBytes) ||
-              artifact.TotalSizeBytes <= 0 || artifact.TotalSizeBytes > 1000000 ||
+              artifact.TotalSizeBytes <= 0 || artifact.TotalSizeBytes > 16000000 ||
               !Array.isArray(artifact.ValidationResults) ||
               !Array.isArray(artifact.InstallationLogs)) return finish("artifact_untrusted");
           const declarations = [...artifact.ValidationResults, ...artifact.InstallationLogs];
@@ -316,7 +316,7 @@ pre-agent-steps:
           for (const item of declarations) {
             if (!safePath(item?.RelativePath) || item.FileName !== item.RelativePath.split("/").at(-1) ||
                 !Number.isSafeInteger(item.SizeBytes) || item.SizeBytes < 0 ||
-                item.SizeBytes > 100000 || declared.has(item.RelativePath))
+                item.SizeBytes > 1000000 || declared.has(item.RelativePath))
               return finish("artifact_untrusted");
             declared.set(item.RelativePath, item);
           }
