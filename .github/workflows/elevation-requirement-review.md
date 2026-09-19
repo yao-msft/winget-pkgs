@@ -7,39 +7,26 @@ description: >-
 on:
   pull_request_target:
     types: [labeled]
-  workflow_dispatch:
-    inputs:
-      pull_request_number:
-        description: Pull request number for a targeted trial or recovery run
-        required: true
-        type: string
   roles: [admin, maintainer, write]
   bots: ["wingetvalidator-prod[bot]"]
 if: >-
-  github.event_name == 'workflow_dispatch' ||
-  (
-    github.event_name == 'pull_request_target' &&
-    github.event.action == 'labeled' &&
-    github.actor == 'wingetvalidator-prod[bot]' &&
-    github.event.label.name == 'Validation-Completed' &&
-    github.event.pull_request.user.login != 'wingetbot'
-  )
+  github.event_name == 'pull_request_target' &&
+  github.event.action == 'labeled' &&
+  github.actor == 'wingetvalidator-prod[bot]' &&
+  github.event.label.name == 'Validation-Completed' &&
+  github.event.pull_request.user.login != 'wingetbot'
 checkout: false
 concurrency:
   group: >-
     gh-aw-${{ github.workflow }}-${{
-    github.event.pull_request.number ||
-    github.event.inputs.pull_request_number ||
-    github.run_id }}
+    github.event.pull_request.number || github.run_id }}
   cancel-in-progress: false
   queue: max
 pre-agent-steps:
   - name: Collect bounded elevation and validation evidence
     uses: actions/github-script@v9
     env:
-      TARGET_PR: >-
-        ${{ github.event.pull_request.number ||
-        github.event.inputs.pull_request_number || '' }}
+      TARGET_PR: ${{ github.event.pull_request.number || '' }}
       TRIGGER_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
     with:
       github-token: "${{ github.token }}"
@@ -413,7 +400,7 @@ safe-outputs:
           env:
             EVIDENCE_PATH: >-
               ${{ runner.temp }}/elevation-review-evidence/elevation-review.json
-            TARGET_PR: ${{ github.event.pull_request.number || github.event.inputs.pull_request_number || '' }}
+            TARGET_PR: ${{ github.event.pull_request.number || '' }}
             EVENT_HEAD: ${{ github.event.pull_request.head.sha || '' }}
             RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           with:
@@ -542,23 +529,9 @@ safe-outputs:
                 core.info("Final pull request gate suppressed the comment.");
                 return;
               }
-              const rendered = `${body}\n\n${footer}`;
-              // This job hardcodes the production target, so any other host
-              // (fork dispatch, trial repository) must preview, not post.
-              const staged = process.env.GH_AW_SAFE_OUTPUTS_STAGED === "true";
-              const foreignHost = process.env.GITHUB_REPOSITORY !== `${owner}/${repo}`;
-              if (staged || foreignHost) {
-                const why = staged ? "staged mode" : "non-production host";
-                core.info(`Preview only (${why}); no comment was posted.`);
-                await core.summary
-                  .addHeading("Elevation Review Preview", 2)
-                  .addRaw(`Would comment on ${owner}/${repo}#${target} (${why}).`)
-                  .addCodeBlock(rendered, "markdown")
-                  .write();
-                return;
-              }
               await github.rest.issues.createComment({
-                owner, repo, issue_number: target, body: rendered,
+                owner, repo, issue_number: target,
+                body: `${body}\n\n${footer}`,
               });
 ---
 
